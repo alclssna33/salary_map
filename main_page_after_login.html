@@ -1,0 +1,239 @@
+<html class="chrome s4 pc"><head><script type="text/javascript" async="" src="https://www.google-analytics.com/analytics.js"></script><script type="text/javascript" async="" src="https://www.googletagmanager.com/gtag/js?id=G-WLTNBCM6NP&amp;cx=c&amp;gtm=4e62d1"></script><script type="text/javascript" src="https://image.medigate.net/resources/module/crypto/crypto-js.4.1.1.min.js"></script>
+<meta charset="utf-8">
+<title>메디게이트</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1">
+<meta name="keywords" content="메디게이트,메겟,medigate,의사,의사포털,의사커뮤니티,메디게이트뉴스,의료뉴스,초빙,구직,병원,클리닉,개원,임대,분양,연수강좌,세미나,학회,에스테틱포럼,캠페인,이벤트,개원올인원">
+<meta name="description" content="메디게이트">
+<meta property="og:url" content="https://www.medigate.net">
+<meta property="og:type" content="website">
+<meta property="og:title" content="메디게이트">
+<meta property="og:image" content="//image.medigate.net/static/images/medigate.png">
+<meta property="og:description" content="대한민국 의사들과 함께하는 메디게이트">
+<meta http-equiv="Expires" content="0">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<link rel="canonical" href="https://www.medigate.net">
+<link rel="shortcut icon" href="//image.medigate.net/static/favicon16.ico">	<!-- size : 32 -->
+<link rel="apple-touch-icon" href="//image.medigate.net/static/apple-touch-icon.png"> <!-- size : 114 -->
+<link rel="stylesheet" type="text/css" href="//image.medigate.net/v2/css/reset.css">
+<link rel="stylesheet" type="text/css" href="//image.medigate.net/v2/css/font.css">
+<link rel="stylesheet" type="text/css" href="//image.medigate.net/static/bootstrap/bootstrap.css">
+<link rel="stylesheet" type="text/css" href="//image.medigate.net/static/sitelog/css/sign.css">
+<script type="text/javascript" src="//image.medigate.net/resources/module/jquery/jquery-3.5.1.min.js"></script>
+<script type="text/javascript" src="//image.medigate.net/resources/module/jquery/jquery-ui.min-1.12.1.js"></script>
+<script type="text/javascript" src="//image.medigate.net/resources/module/jquery_plugins/jquery.bxslider.js"></script>
+<script type="text/javascript" src="//image.medigate.net/resources/module/jquery_plugins/flexresize.js"></script>
+
+<script type="text/javascript" src="//image.medigate.net/static/nice-select/jquery.nice-select.min.js"></script>
+<script type="text/javascript" src="//image.medigate.net/resources/module/crypto/crypto-js.4.1.1.min.js"></script>
+<script type="text/javascript" src="//image.medigate.net/resources/js/common/common.js?v=1756080891297" charset="UTF-8"></script>
+<script type="text/javascript">
+	$(function(){
+	    /*
+		var f = document.loginForm;
+		if(f['usrId'].value == ""){
+			f['usrId'].focus();
+		}
+		else{
+			f['usrPasswd'].focus();
+		}
+		*/
+	});
+
+	function checkLoginForm(){
+		var f = document.loginForm;
+		if(f['usrIdT'].value == ''){
+			alert("아이디를 입력하세요.");;
+			f['usrIdT'].focus();
+			return false;
+		}
+		if(f['usrPasswdT'].value == ''){
+			alert("비밀번호를 입력하세요.");
+			f['usrPasswdT'].focus();
+			return false;
+		}
+
+        f['usrId'].value = encryptedData(f['usrIdT'].value);
+        f['usrPasswd'].value = encryptedData(f['usrPasswdT'].value);
+        f['usrIdT'].value = '';
+        f['usrPasswdT'].value = '';
+
+		f.action = "/user/login_pro";
+		f.submit();
+	}
+
+	function changeLoutPeriod(obj){
+		var f = document.loginForm;
+		if(obj.checked){
+			f.saveLoutPeriod.disabled = false;
+		}
+		else{
+			f.saveLoutPeriod.disabled = true;
+		}
+	}
+</script>
+
+
+    
+        
+        
+            <!-- Global site tag (gtag.js) - Google Analytics -->
+            <script async="" src="https://www.googletagmanager.com/gtag/js?id=UA-2372399-1"></script>
+            <script type="text/javascript">
+                window.dataLayer = window.dataLayer || [];
+                function gtag(){dataLayer.push(arguments);}
+                gtag('js', new Date());
+                gtag('config', 'UA-2372399-1');
+            </script>
+        
+    
+
+    
+    <script type="text/javascript" src="//wcs.naver.net/wcslog.js"></script><script type="text/javascript" async="" src="https://ssl.pstatic.net/melona/libs/gfp-nac-module/synchronizer.js"></script>
+
+
+
+
+<script type="text/javascript" async="" src="https://ssl.pstatic.net/melona/libs/gfp-nac-module/synchronizer.js"></script></head>
+<body>
+<div id="sign">
+    <section class="signbar medigate-news">
+        <div class="side-contwrap bg-medigate">
+            <header class="logo_area">
+                <a class="medigate" href="/">MEDI:GATE</a>
+                <p class="slogan">
+                    Doctor's Life &amp;<br>Business Partner
+                </p>
+            </header>
+        </div>
+    </section>
+    <section class="container">
+        <main>
+            <div class="contwrap">
+                <div class="auth-content">
+                    <h2>메디게이트 로그인</h2>
+                    <p class="subtxt">
+                        
+                            
+                            <span style="size:13px; color:#FF8000;"><b>비밀번호가 일치하지 않습니다.</b></span>
+                        
+                    </p>
+                </div>
+                <div class="signwrap">
+                    <form name="loginForm" method="post" onsubmit="return false;"><input type="hidden" name="csSignature" value="9W6i+dmmdqh/y9N7Zxpe8w==">
+
+                    <input type="hidden" name="usrId">
+                    <input type="hidden" name="usrPasswd">
+                    <input type="hidden" name="retUrl" value="/">
+                    <div class="sign-in-form">
+                        <div class="txtinput">
+                            <input type="text" name="usrIdT" value="" tabindex="1"><span class="bar"></span>
+                            <label>아이디</label>
+                        </div>
+                        <div class="txtinput">
+                            <input type="password" name="usrPasswdT" tabindex="21"><span class="bar"></span>
+                            <label>비밀번호</label>
+                        </div>
+                    </div>
+                    <div class="boxlist">
+                        <label class="control control--checkbox">
+                            <span class="conttxt">아이디 기억</span>
+                            <input type="checkbox" name="saveUsrId" value="Y">
+                            <div class="control__indicator"></div>
+                        </label>
+                        <div class="lstcheck">
+                            <span class="txtit">자동로그아웃</span>
+                            <div class="combobox">
+                                <select name="saveLoutPeriod" class="multiple-select" style="display: none;">
+                                    <option value="" selected="">사용안함</option>
+                                    <option value="30">30분</option>
+                                    <option value="60">1시간</option>
+                                    <option value="120">2시간</option>
+                                    <option value="180">3시간</option>
+                                    <option value="240">4시간</option>
+                                </select><div class="nice-select multiple-select" tabindex="0"><span class="current">사용안함</span><ul class="list"><li data-value="" class="option selected">사용안함</li><li data-value="30" class="option">30분</li><li data-value="60" class="option">1시간</li><li data-value="120" class="option">2시간</li><li data-value="180" class="option">3시간</li><li data-value="240" class="option">4시간</li></ul></div>
+                            </div>
+                            <script>
+                                $(document).ready(function() {
+                                    $('select').niceSelect();
+                                });
+                            </script>
+                        </div>
+                    </div>
+                    <div class="sign-btn">
+                        <p class="btn_login"><button type="submit" onclick="checkLoginForm();" class="button type1">로그인하기</button></p>
+                        <p class="btn_login"><a href="/user/member/findForm?findType=U_ID" class="button type2">아이디찾기</a></p>
+                        <p class="btn_login"><a href="/user/member/findForm?findType=U_PASSWD" class="button type2">비밀번호찾기</a></p>
+                    </div>
+                    <p class="linespace_or"></p>
+                    </form>
+                </div>
+                <div class="auth-content sub">
+                    <p class="subtxt">대한민국 No.1 의사 커뮤니티로서 1999년부터 대한민국 의사선생님과 함께 온 메디게이트가 제공하는 Doctor's Life &amp; Business Partner Service를 만나보세요.</p>
+                    <div class="signup">
+                        <a href="/user/member/addStep01" class="button type1">메디게이트 회원가입</a>
+                        <a href="/user/member/expiredStep01" class="button type2">휴면 계정 해제<span class="txtnotice">(1년 이상 미 이용)</span></a>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </section>
+</div>
+
+
+
+
+<script type="text/javascript">
+    var docTitle = document.title;
+    if(docTitle == "" || docTitle == "-"){
+        document.title = "메디게이트";
+    }
+
+    $(function() {
+        //정지된 계정 강제 로그아웃
+        $.ajax({
+            type: "GET",
+            async: true,
+            url: '/inc/navi/warning_check.jsp',
+            data: {},
+            dataType: 'JSON',
+            success: function(result){
+                if(result.status == "N")
+                {
+                    if(result && result.msg){
+                        alert(result.msg);
+                    }
+                    logout();
+                }
+            },
+            error:function(xhr) {}
+        });
+
+        
+
+        //Naver Log (공통 스크립트)
+        if(!wcs_add) var wcs_add = {};
+        wcs_add["wa"] = "s_4c8b7caefd28";
+        // wcs_add["wa"] = "fa6c4e0532a358";
+        if (!_nasa) var _nasa={};
+        if (window.wcs) {
+            wcs.inflow("medigate.net");
+            wcs_do(_nasa);
+        }
+
+    });
+
+</script>
+<script type="text/javascript" src="//wcs.naver.net/wcslog.js"></script>
+<script type="text/javascript">
+    if(!wcs_add) var wcs_add = {};
+    wcs_add["wa"] = "fa6c4e0532a358";
+    if(window.wcs) {
+        wcs_do();
+    }
+</script>
+
+
+
+
+</body></html>
