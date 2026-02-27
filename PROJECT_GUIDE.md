@@ -23,6 +23,8 @@
 ├── salary_backfill.py     ★ 기존 DB 2,760건에 급여 데이터 추가 (상세 페이지 방문, 1회성)
 ├── salary_calculator.py   ★ 한국 실수령액 계산기 (2025 기준) + 급여 텍스트 파서
 ├── recalculate_net.py     ★ DB에 저장된 salary_net_min/max 재계산 (정책 변경 시 사용)
+├── import_excel_to_db.py  ★ 엑셀 과거자료 → machwi_excel_history 테이블 import (1회성 완료)
+│                            --reset 옵션으로 재import 가능
 │
 ├── app.py                 ★ Streamlit 대시보드 (PostgreSQL → 시각화)
 │
@@ -90,6 +92,21 @@
 | `salary_net_min` | **Net 환산 월급 최솟값 (만원)** ← 아래 계산 정책 참고 |
 | `salary_net_max` | **Net 환산 월급 최댓값 (만원)** |
 | `salary_fetched` | 상세 페이지 방문 완료 여부 (backfill 중복 방지) |
+
+### `machwi_excel_history` — 마취통증의학과 엑셀 과거자료
+| 컬럼 | 설명 |
+|------|------|
+| `id` | PK (자동 증가) |
+| `reg_month` | 등록 월 `YYYY-MM` |
+| `region` | 지역 (엑셀 기재값 그대로, 예: 부산, 경기수원) |
+| `hospital_name` | 병원명 |
+| `net_pay` | Net 월급 (만원). 예: 2300 = 2,300만원 |
+| `source` | `'excel_import'` 고정 — 엑셀 수동 수집 원본임을 표시 |
+| `imported_at` | import 실행 시각 |
+
+> 원본: `(마봉협)구인구직정리.xlsx` 일자리분석 시트 / `import_excel_to_db.py`로 2026-02-27 import 완료
+> 총 **4,220건** / 35개월 (2023-03 ~ 2026-01)
+> Supabase 이관 시 이 테이블도 함께 이관하면 엑셀 파일 불필요
 
 ### `recruit_post_specialties` — 진료과 (1:N)
 | 컬럼 | 설명 |
@@ -304,7 +321,11 @@ pip install matplotlib
 | | — `--info` 옵션: DB 현황(최신일·총 건수·월별 공고 수) 확인 후 종료 |
 | | — `--from` / `--to` 옵션: 날짜 범위 지정 수집 |
 | | — 범위 이전 페이지 2개 연속 감지 시 자동 조기 종료 |
-| 2026-02-27 | `app.py` — 마취통증의학과 장기 트렌드 섹션 추가 (엑셀 과거자료 + DB 통합) |
+| 2026-02-27 | **엑셀 과거자료 DB 이관** — `machwi_excel_history` 테이블 생성 + 4,220건 import |
+| | — `import_excel_to_db.py` 작성 (--reset 옵션으로 재import 가능) |
+| | — `app.py` `load_excel_machwi()` 엑셀 파일 직접 읽기 → DB 쿼리 방식으로 교체 |
+| | — Supabase 이관 계획 3단계 완료 처리 (pg_dump에 자동 포함) |
+| | `app.py` — 마취통증의학과 장기 트렌드 섹션 추가 (엑셀 과거자료 + DB 통합) |
 | | — `load_excel_machwi()`: (마봉협)구인구직정리.xlsx 파싱 → 35개월 공고수·평균급여 추출 |
 | | — `load_db_machwi()`: DB에서 마취통증의학과 월별 공고수·net/monthly 급여 집계 |
 | | — 진료과 = 마취통증의학과 선택 시에만 섹션 표시 |
@@ -357,53 +378,18 @@ DB_URL = "postgresql+psycopg2://postgres:[비밀번호]@[프로젝트].supabase.
 
 > Supabase는 SSL 필수 → `?sslmode=require` 반드시 추가
 
-### 3단계 — ⚠️ 엑셀 과거 데이터 이관 (놓치기 쉬움!)
+### 3단계 — 엑셀 과거 데이터 이관 ✅ 이미 완료 (2026-02-27)
 
 **현재 상황:**
-- `app.py`의 `load_excel_machwi()` 함수가 **(마봉협)구인구직정리.xlsx** 파일을 **로컬에서 직접 읽음**
-- 앱을 클라우드(Streamlit Cloud 등)에 배포하면 엑셀 파일에 접근 불가 → 해당 기능 동작 안 함
-
-**해결 방법 — 엑셀 데이터를 Supabase 테이블로 1회 import:**
-
-```sql
--- Supabase에 테이블 생성
-CREATE TABLE machwi_excel_history (
-    reg_month   CHAR(7)  NOT NULL,   -- 'YYYY-MM'
-    post_count  INTEGER  NOT NULL,   -- 해당 월 공고 수
-    avg_net_pay INTEGER  NOT NULL,   -- 평균 Net 월급 (만원)
-    PRIMARY KEY (reg_month)
-);
-```
-
-import 스크립트 예시 (`import_excel_to_supabase.py` 작성 필요):
-
-```python
-# load_excel_machwi() 결과를 machwi_excel_history 테이블에 INSERT
-df = load_excel_machwi()
-df.rename(columns={"공고수": "post_count", "평균Net월급": "avg_net_pay", "등록월": "reg_month"})
-  .drop(columns=["출처"])
-  .to_sql("machwi_excel_history", engine, if_exists="replace", index=False)
-```
-
-import 완료 후 `app.py`의 `load_excel_machwi()` 함수를 아래 DB 쿼리로 교체:
-
-```python
-@st.cache_data(ttl=3600)
-def load_excel_machwi() -> pd.DataFrame:
-    sql = text("SELECT reg_month AS 등록월, post_count AS 공고수, avg_net_pay AS 평균Net월급 FROM machwi_excel_history ORDER BY reg_month")
-    with get_engine().connect() as conn:
-        df = pd.read_sql(sql, conn)
-    df["출처"] = "엑셀(과거)"
-    return df
-```
+- `machwi_excel_history` 테이블이 로컬 PostgreSQL에 존재 (**4,220건 / 35개월**, source=`excel_import`)
+- `app.py`의 `load_excel_machwi()`가 이미 DB 쿼리 방식으로 동작 중
+- **`pg_dump` 시 자동 포함** → Supabase 이관 시 별도 작업 불필요
 
 ### 이관 체크리스트
 
-- [ ] `pg_dump`로 기존 DB 백업
+- [ ] `pg_dump`로 기존 DB 백업 (`machwi_excel_history` 자동 포함)
 - [ ] Supabase 프로젝트 생성 및 복원
 - [ ] `app.py` DB_URL + `?sslmode=require` 교체
-- [ ] **`machwi_excel_history` 테이블 생성 및 엑셀 데이터 import** ← 놓치지 말 것
-- [ ] `load_excel_machwi()` 함수를 DB 쿼리 방식으로 교체
 - [ ] `phase4_crawler.py` DB_CONFIG도 Supabase 주소로 교체
 
 ---
@@ -423,4 +409,5 @@ def load_excel_machwi() -> pd.DataFrame:
 - [ ] 마감 임박 공고 필터 기능 추가
 - [ ] 지역별 히트맵 시각화 추가
 - [ ] 자체 홈페이지 API 연동 크롤러(`gaebigong_crawler.py`) 작성
-- [ ] **Supabase 이관 시** — `machwi_excel_history` 테이블 생성 + 엑셀 데이터 import → `load_excel_machwi()` DB 쿼리 방식으로 교체 (☁️ Supabase 이관 계획 섹션 참고)
+- [x] **엑셀 과거자료 DB 이관** — `machwi_excel_history` 테이블 생성 + 4,220건 import 완료 → `load_excel_machwi()` DB 쿼리 방식으로 교체 완료
+- [ ] **Supabase 이관 시** — `machwi_excel_history` 테이블도 함께 이관 (`pg_dump`에 자동 포함됨)

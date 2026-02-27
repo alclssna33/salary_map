@@ -13,21 +13,11 @@ app.py  –  메디게이트 구인 트렌드 Streamlit 대시보드
 - 급여 현황: 지역별 / 진료과별 평균 Net 월급 수평 막대 그래프
 """
 
-import os
-import re as _re
-from datetime import datetime as _dt
-
-import openpyxl
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from sqlalchemy import create_engine, text
-
-EXCEL_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "(마봉협)구인구직정리.xlsx",
-)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 페이지 설정
@@ -54,65 +44,29 @@ def get_engine():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @st.cache_data(ttl=3600)
 def load_excel_machwi() -> pd.DataFrame:
-    """엑셀 일자리분석 시트에서 월별 공고수 & 평균 Net 월급 추출.
-    구조: 4열 1그룹 (blank | 지역 | 병원명 | Pay)  ×  35개월
-    Pay 단위: 2.3 → 2,300만원 (× 1000)
+    """machwi_excel_history 테이블에서 월별 공고수 & 평균 Net 월급 집계.
+    원본: (마봉협)구인구직정리.xlsx → import_excel_to_db.py 로 1회 import 완료
+    source = 'excel_import' 태그로 DB에 저장되어 있음
     """
-    if not os.path.exists(EXCEL_PATH):
-        return pd.DataFrame()
+    sql = text("""
+        SELECT
+            reg_month          AS reg_month,
+            COUNT(*)           AS post_cnt,
+            ROUND(AVG(net_pay)) AS avg_net
+        FROM  machwi_excel_history
+        WHERE source = 'excel_import'
+        GROUP BY reg_month
+        ORDER BY reg_month
+    """)
     try:
-        wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
-        ws = wb["일자리분석"]
-    except Exception:
+        with get_engine().connect() as conn:
+            df = pd.read_sql(sql, conn)
+        df = df.rename(columns={"reg_month": "등록월", "post_cnt": "공고수", "avg_net": "평균Net월급"})
+        df["출처"] = "엑셀(과거)"
+        return df
+    except Exception as e:
+        st.error(f"엑셀 과거자료 조회 오류: {e}")
         return pd.DataFrame()
-
-    records = []
-    col = 1
-    while col <= ws.max_column:
-        # 그룹 날짜: row 8, 각 그룹 첫 번째 열
-        date_val = ws.cell(8, col).value
-        if date_val is None:
-            col += 4
-            continue
-
-        if isinstance(date_val, _dt):
-            month_str = date_val.strftime("%Y-%m")
-        elif isinstance(date_val, str):
-            m = _re.match(r"(\d{4})년(\d{1,2})월", date_val)
-            month_str = f"{m.group(1)}-{int(m.group(2)):02d}" if m else None
-        else:
-            month_str = None
-
-        if not month_str:
-            col += 4
-            continue
-
-        # Pay 수집: col+3 (4번째 열)
-        pays = []
-        for row in range(10, ws.max_row + 1):
-            v = ws.cell(row, col + 3).value
-            if v is None:
-                continue
-            try:
-                f = float(v)
-                if 0.5 <= f <= 10.0:          # 500 ~ 10,000만원 유효 범위
-                    pays.append(f * 1000)
-            except (TypeError, ValueError):
-                continue
-
-        if pays:
-            records.append({
-                "등록월":    month_str,
-                "공고수":    len(pays),
-                "평균Net월급": round(sum(pays) / len(pays)),
-                "출처":      "엑셀(과거)",
-            })
-        col += 4
-
-    df = pd.DataFrame(records)
-    if not df.empty:
-        df = df.sort_values("등록월").drop_duplicates("등록월", keep="first")
-    return df
 
 
 @st.cache_data(ttl=60)
