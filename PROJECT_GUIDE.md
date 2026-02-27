@@ -304,6 +304,12 @@ pip install matplotlib
 | | — `--info` 옵션: DB 현황(최신일·총 건수·월별 공고 수) 확인 후 종료 |
 | | — `--from` / `--to` 옵션: 날짜 범위 지정 수집 |
 | | — 범위 이전 페이지 2개 연속 감지 시 자동 조기 종료 |
+| 2026-02-27 | `app.py` — 마취통증의학과 장기 트렌드 섹션 추가 (엑셀 과거자료 + DB 통합) |
+| | — `load_excel_machwi()`: (마봉협)구인구직정리.xlsx 파싱 → 35개월 공고수·평균급여 추출 |
+| | — `load_db_machwi()`: DB에서 마취통증의학과 월별 공고수·net/monthly 급여 집계 |
+| | — 진료과 = 마취통증의학과 선택 시에만 섹션 표시 |
+| | — 차트 1: 묶음 막대(엑셀=파랑 / DB=주황), 차트 2: 이중 라인 급여 추이 |
+| | `PROJECT_GUIDE.md` — Supabase 이관 계획 섹션 추가 (엑셀→테이블 import 절차 포함) |
 
 ---
 
@@ -325,6 +331,83 @@ pip install matplotlib
 
 ---
 
+## ☁️ Supabase 이관 계획
+
+로컬 PostgreSQL → Supabase(온라인 PostgreSQL)로 전환 시 아래 순서대로 진행.
+
+### 1단계 — DB 이관 (표준 PostgreSQL 덤프)
+
+```bash
+# 로컬 → SQL 덤프
+pg_dump -U postgres -d medigate -f medigate_dump.sql
+
+# Supabase SQL 에디터 or psql로 복원
+psql -h [프로젝트].supabase.co -U postgres -d postgres -f medigate_dump.sql
+```
+
+### 2단계 — app.py DB_URL 교체 (한 줄만 수정)
+
+```python
+# 변경 전
+DB_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/medigate"
+
+# 변경 후
+DB_URL = "postgresql+psycopg2://postgres:[비밀번호]@[프로젝트].supabase.co:5432/postgres?sslmode=require"
+```
+
+> Supabase는 SSL 필수 → `?sslmode=require` 반드시 추가
+
+### 3단계 — ⚠️ 엑셀 과거 데이터 이관 (놓치기 쉬움!)
+
+**현재 상황:**
+- `app.py`의 `load_excel_machwi()` 함수가 **(마봉협)구인구직정리.xlsx** 파일을 **로컬에서 직접 읽음**
+- 앱을 클라우드(Streamlit Cloud 등)에 배포하면 엑셀 파일에 접근 불가 → 해당 기능 동작 안 함
+
+**해결 방법 — 엑셀 데이터를 Supabase 테이블로 1회 import:**
+
+```sql
+-- Supabase에 테이블 생성
+CREATE TABLE machwi_excel_history (
+    reg_month   CHAR(7)  NOT NULL,   -- 'YYYY-MM'
+    post_count  INTEGER  NOT NULL,   -- 해당 월 공고 수
+    avg_net_pay INTEGER  NOT NULL,   -- 평균 Net 월급 (만원)
+    PRIMARY KEY (reg_month)
+);
+```
+
+import 스크립트 예시 (`import_excel_to_supabase.py` 작성 필요):
+
+```python
+# load_excel_machwi() 결과를 machwi_excel_history 테이블에 INSERT
+df = load_excel_machwi()
+df.rename(columns={"공고수": "post_count", "평균Net월급": "avg_net_pay", "등록월": "reg_month"})
+  .drop(columns=["출처"])
+  .to_sql("machwi_excel_history", engine, if_exists="replace", index=False)
+```
+
+import 완료 후 `app.py`의 `load_excel_machwi()` 함수를 아래 DB 쿼리로 교체:
+
+```python
+@st.cache_data(ttl=3600)
+def load_excel_machwi() -> pd.DataFrame:
+    sql = text("SELECT reg_month AS 등록월, post_count AS 공고수, avg_net_pay AS 평균Net월급 FROM machwi_excel_history ORDER BY reg_month")
+    with get_engine().connect() as conn:
+        df = pd.read_sql(sql, conn)
+    df["출처"] = "엑셀(과거)"
+    return df
+```
+
+### 이관 체크리스트
+
+- [ ] `pg_dump`로 기존 DB 백업
+- [ ] Supabase 프로젝트 생성 및 복원
+- [ ] `app.py` DB_URL + `?sslmode=require` 교체
+- [ ] **`machwi_excel_history` 테이블 생성 및 엑셀 데이터 import** ← 놓치지 말 것
+- [ ] `load_excel_machwi()` 함수를 DB 쿼리 방식으로 교체
+- [ ] `phase4_crawler.py` DB_CONFIG도 Supabase 주소로 교체
+
+---
+
 ## 🚀 다음 작업 예정 (TODO)
 
 - [x] `salary_backfill.py` 실행 완료 → 2,186건 급여 데이터 수집
@@ -340,3 +423,4 @@ pip install matplotlib
 - [ ] 마감 임박 공고 필터 기능 추가
 - [ ] 지역별 히트맵 시각화 추가
 - [ ] 자체 홈페이지 API 연동 크롤러(`gaebigong_crawler.py`) 작성
+- [ ] **Supabase 이관 시** — `machwi_excel_history` 테이블 생성 + 엑셀 데이터 import → `load_excel_machwi()` DB 쿼리 방식으로 교체 (☁️ Supabase 이관 계획 섹션 참고)
