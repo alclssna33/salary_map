@@ -412,6 +412,104 @@ def load_aggregated() -> pd.DataFrame:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 전국 지도 & 흐름 보기 — 시도별/시군구별 월별 집계 (Tab2 전용)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+@st.cache_data(ttl=60)
+def load_national_trend(specialty: str, employment_type: str) -> pd.DataFrame:
+    """시도별·월별 구인건수 + 평균 Net 페이 집계 (Tab2 스몰 멀티플즈·버블맵 공용).
+
+    반환 컬럼: region_sido, reg_month, cnt, avg_pay
+    - avg_pay: salary_net_min > 1300 조건, 없으면 None
+    - 마취통증의학과 선택 시 machwi_excel_history 데이터도 합산
+    """
+    conditions = [
+        "rp.register_date IS NOT NULL",
+        "rp.register_date <> ''",
+        "rp.region_sido   IS NOT NULL",
+        "rp.region_sido   <> ''",
+    ]
+    params: dict = {}
+    need_spec_join = specialty != "전체"
+
+    if specialty != "전체":
+        conditions.append("rps.specialty = :specialty")
+        params["specialty"] = specialty
+    if employment_type != "전체":
+        conditions.append("rp.employment_type = :employment_type")
+        params["employment_type"] = employment_type
+
+    join = "JOIN recruit_post_specialties rps ON rps.post_id = rp.id" if need_spec_join else ""
+    where = " AND ".join(conditions)
+
+    sql = text(f"""
+        SELECT
+            rp.region_sido                          AS region_sido,
+            LEFT(rp.register_date, 7)               AS reg_month,
+            COUNT(DISTINCT rp.id)                   AS cnt,
+            ROUND(AVG(CASE
+                WHEN rp.salary_net_min > 1300 AND rp.salary_net_max > 1300
+                THEN (rp.salary_net_min + rp.salary_net_max) / 2.0
+                ELSE NULL END))                     AS avg_pay
+        FROM recruit_posts rp
+        {join}
+        WHERE {where}
+        GROUP BY rp.region_sido, LEFT(rp.register_date, 7)
+        ORDER BY reg_month
+    """)
+    try:
+        with get_engine().connect() as conn:
+            df_db = pd.read_sql(sql, conn, params=params)
+    except Exception as e:
+        st.error(f"전국 트렌드 조회 오류: {e}")
+        return pd.DataFrame()
+
+    # ── 마취통증의학과: Excel 데이터 합산 ─────────────────────────────────────
+    if specialty in ("전체", "마취통증의학과"):
+        try:
+            with get_engine().connect() as conn:
+                df_xl = pd.read_sql(text("""
+                    SELECT
+                        LEFT(meh.region, 2)   AS region_sido,
+                        meh.reg_month         AS reg_month,
+                        COUNT(*)              AS cnt,
+                        ROUND(AVG(meh.net_pay)) AS avg_pay
+                    FROM machwi_excel_history meh
+                    WHERE meh.source = 'excel_import'
+                    GROUP BY LEFT(meh.region, 2), meh.reg_month
+                """), conn)
+        except Exception:
+            df_xl = pd.DataFrame()
+
+        if not df_xl.empty:
+            # 월×시도 키로 합산: cnt 합치고 avg_pay는 가중 평균
+            df_xl["cnt"]     = df_xl["cnt"].astype(int)
+            df_xl["avg_pay"] = pd.to_numeric(df_xl["avg_pay"], errors="coerce")
+            df_db["cnt"]     = df_db["cnt"].astype(int)
+            df_db["avg_pay"] = pd.to_numeric(df_db["avg_pay"], errors="coerce")
+
+            combined = pd.concat([df_db, df_xl], ignore_index=True)
+            def _wavg(grp):
+                total_cnt = grp["cnt"].sum()
+                valid = grp.dropna(subset=["avg_pay"])
+                if valid.empty:
+                    return pd.Series({"cnt": total_cnt, "avg_pay": None})
+                wav = (valid["avg_pay"] * valid["cnt"]).sum() / valid["cnt"].sum()
+                return pd.Series({"cnt": total_cnt, "avg_pay": round(wav)})
+
+            df_db = (
+                combined
+                .groupby(["region_sido", "reg_month"], group_keys=False)
+                .apply(_wavg)
+                .reset_index()
+                .sort_values("reg_month")
+            )
+
+    df_db["cnt"]     = df_db["cnt"].astype(int)
+    df_db["avg_pay"] = pd.to_numeric(df_db["avg_pay"], errors="coerce")
+    return df_db
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 병원 목록 조회 (클릭 시 호출 — 캐싱 없음, 매번 최신 조회)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def load_hospitals(month: str, region: str, specialty: str,
@@ -901,477 +999,605 @@ if selected_specialty != "전체":
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 st.title("🏥 구인 트렌드 대시보드")
 st.caption(f"필터 적용 중 → 지역: **{selected_region}** · 진료과: **{selected_specialty}**")
-st.divider()
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 막대그래프 — 제목 + 고용형태 드롭다운 (인라인)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 고용형태 목록: DB 실제 값 기준 (건수 많은 순 고정 정렬)
+tab1, tab2 = st.tabs(["📋 지역 상세 분석", "🗺️ 전국 지도 & 흐름 보기"])
+
 EMPLOYMENT_TYPES = [
     "전체", "봉직의", "대진의", "당직의", "전임의", "전공의",
     "입원전담전문의", "출장검진", "임상(사내의사)", "임상외", "동업", "기타",
 ]
 
-col_title, col_emp = st.columns([5, 2])
-with col_title:
-    st.subheader("📊 월별 구인건수")
-    st.caption("💡 막대를 클릭하면 해당 월의 병원 목록을 확인할 수 있습니다.")
-with col_emp:
-    st.markdown("<br>", unsafe_allow_html=True)   # 제목과 높이 맞춤
-    selected_employment = st.selectbox(
-        "👔 고용형태",
-        EMPLOYMENT_TYPES,
-        index=0,                   # 기본값: 전체
-        key="employment_filter",
-    )
-
-# 고용형태 필터 적용 후 월별 집계
-df_emp = df.copy()
-if selected_employment != "전체":
-    df_emp = df_emp[df_emp["employment_type"] == selected_employment]
-
-df_monthly = (
-    df_emp.groupby("reg_month")["post_count"]
-    .sum().reset_index().sort_values("reg_month")
-)
-df_monthly["reg_month"] = df_monthly["reg_month"].astype(str)
-
-# ── KPI 카드 ───────────────────────────────────────────────────────────────
-col1, col2, col3 = st.columns(3)
-total_posts  = int(df_monthly["post_count"].sum()) if not df_monthly.empty else 0
-col1.metric("총 공고 수",  f"{total_posts:,}건")
-col2.metric("집계 월 수",  f"{len(df_monthly)}개월")
-if not df_monthly.empty:
-    peak = df_monthly.loc[df_monthly["post_count"].idxmax()]
-    col3.metric("최고 공고월", f"{peak['reg_month']} ({int(peak['post_count'])}건)")
-else:
-    col3.metric("최고 공고월", "-")
-
-st.divider()
-
-if df_monthly.empty:
-    st.warning("선택한 조건에 해당하는 데이터가 없습니다.")
-else:
-    fig = px.bar(
-        df_monthly,
-        x="reg_month",
-        y="post_count",
-        text="post_count",
-        labels={"reg_month": "등록 월", "post_count": "공고 수"},
-        color_discrete_sequence=["#2196F3"],
-        category_orders={"reg_month": sorted(df_monthly["reg_month"].tolist())},
-    )
-    fig.update_traces(
-        textposition="outside",
-        textfont_size=12,
-        hovertemplate="<b>%{x}</b><br>공고 수: <b>%{y}건</b>  ← 클릭하세요<extra></extra>",
-    )
-    fig.update_layout(
-        xaxis_title="등록 월",
-        yaxis_title="공고 수",
-        plot_bgcolor="white",
-        xaxis=dict(tickangle=-30, type="category"),
-        yaxis=dict(
-            gridcolor="#eeeeee",
-            zeroline=True,
-            range=[0, df_monthly["post_count"].max() * 1.25],
-        ),
-        bargap=0.35,
-        height=460,
-        margin=dict(t=30, b=50, l=50, r=20),
-        hoverlabel=dict(bgcolor="white", font_size=13),
-        # 클릭 가능함을 커서로 암시
-        clickmode="event",
-    )
-
-    # on_select="rerun": 클릭 시 앱 재실행 + 선택 정보 반환
-    event = st.plotly_chart(
-        fig,
-        use_container_width=True,
-        on_select="rerun",
-        selection_mode="points",
-        key="bar_chart",
-    )
-
-    # 클릭된 막대가 있으면 다이얼로그 열기
-    points = event.selection.get("points", []) if event.selection else []
-    if points:
-        clicked_month = str(points[0].get("x", ""))
-        if clicked_month:
-            show_hospital_dialog(
-                clicked_month, selected_region,
-                selected_specialty, selected_employment,
-            )
-
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 상세 데이터 테이블
+# Tab 1: 지역 상세 분석 (기존 기능 전체)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-with st.expander("📋 상세 데이터 테이블 보기"):
-    if df_emp.empty:
-        st.info("데이터가 없습니다.")
-    else:
-        st.dataframe(
-            df_emp.sort_values(["reg_month", "region", "specialty"])
-            .rename(columns={
-                "region":          "지역",
-                "specialty":       "진료과",
-                "employment_type": "고용형태",
-                "reg_month":       "등록 월",
-                "post_count":      "공고 수",
-            })
-            .reset_index(drop=True),
-            use_container_width=True,
-            hide_index=True,
+with tab1:
+
+    # ── 막대그래프 — 제목 + 고용형태 드롭다운 (인라인) ─────────────────────
+    col_title, col_emp = st.columns([5, 2])
+    with col_title:
+        st.subheader("📊 월별 구인건수")
+        st.caption("💡 막대를 클릭하면 해당 월의 병원 목록을 확인할 수 있습니다.")
+    with col_emp:
+        st.markdown("<br>", unsafe_allow_html=True)
+        selected_employment = st.selectbox(
+            "👔 고용형태",
+            EMPLOYMENT_TYPES,
+            index=0,
+            key="employment_filter",
         )
 
+    # 고용형태 필터 적용 후 월별 집계
+    df_emp = df.copy()
+    if selected_employment != "전체":
+        df_emp = df_emp[df_emp["employment_type"] == selected_employment]
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 급여 현황 — 월별 Net 월급 추이
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-st.divider()
-st.subheader("💰 급여 현황 — 월별 평균 Net 월급 추이 (봉직의)")
-st.caption(
-    "봉직의 공고 한정 · Net 월급 기준 · 인센티브 비포함 · 협의/미기재 공고 제외 · "
-    "15건 이상 그룹: IQR 이상치 제거 후 평균 · 15건 미만 그룹: 중앙값"
-)
-
-# ── 데이터 로드 (사이드바 필터 그대로 사용) ───────────────────────────────
-df_sal = load_salary_monthly(selected_region, selected_specialty)
-
-# ── KPI 카드 ───────────────────────────────────────────────────────────────
-sk1, sk2, sk3 = st.columns(3)
-
-if not df_sal.empty:
-    total_cnt = int(df_sal["공고수"].sum())
-    overall_avg = int(
-        (df_sal["평균Net월급"] * df_sal["공고수"]).sum() / df_sal["공고수"].sum()
+    df_monthly = (
+        df_emp.groupby("reg_month")["post_count"]
+        .sum().reset_index().sort_values("reg_month")
     )
-    peak = df_sal.loc[df_sal["평균Net월급"].idxmax()]
-    sk1.metric("집계 공고 수", f"{total_cnt:,}건")
-    sk2.metric("전체 기간 평균", f"{overall_avg:,}만원")
-    sk3.metric("최고 평균 월", f"{peak['등록월']} ({int(peak['평균Net월급']):,}만원)")
-else:
-    sk1.metric("집계 공고 수", "-")
-    sk2.metric("전체 기간 평균", "-")
-    sk3.metric("최고 평균 월", "-")
+    df_monthly["reg_month"] = df_monthly["reg_month"].astype(str)
 
-st.divider()
+    # ── KPI 카드 ───────────────────────────────────────────────────────────
+    col1, col2, col3 = st.columns(3)
+    total_posts = int(df_monthly["post_count"].sum()) if not df_monthly.empty else 0
+    col1.metric("총 공고 수",  f"{total_posts:,}건")
+    col2.metric("집계 월 수",  f"{len(df_monthly)}개월")
+    if not df_monthly.empty:
+        peak = df_monthly.loc[df_monthly["post_count"].idxmax()]
+        col3.metric("최고 공고월", f"{peak['reg_month']} ({int(peak['post_count'])}건)")
+    else:
+        col3.metric("최고 공고월", "-")
 
-# ── 월별 막대 그래프 ────────────────────────────────────────────────────────
-if df_sal.empty:
-    st.info("선택한 조건에 해당하는 급여 데이터가 없습니다.")
-else:
-    region_label    = selected_region    if selected_region    != "전체" else "전국"
-    specialty_label = selected_specialty if selected_specialty != "전체" else "전체 진료과"
-    chart_title = f"{region_label} · {specialty_label} 월별 평균 Net 월급"
-
-    fig_sal = px.bar(
-        df_sal,
-        x="등록월",
-        y="평균Net월급",
-        text=df_sal["평균Net월급"].apply(lambda v: f"{int(v):,}만원"),
-        custom_data=["공고수"],
-        color_discrete_sequence=["#43A047"],
-        category_orders={"등록월": sorted(df_sal["등록월"].tolist())},
-        title=chart_title,
-    )
-    fig_sal.update_traces(
-        textposition="outside",
-        textfont_size=12,
-        hovertemplate=(
-            "<b>%{x}</b><br>"
-            "평균 Net 월급: <b>%{y:,}만원</b><br>"
-            "집계 공고: %{customdata[0]}건<extra></extra>"
-        ),
-    )
-    fig_sal.update_layout(
-        xaxis_title="등록 월",
-        yaxis_title="평균 Net 월급 (만원)",
-        plot_bgcolor="white",
-        xaxis=dict(tickangle=-30, type="category"),
-        yaxis=dict(
-            gridcolor="#eeeeee",
-            zeroline=True,
-            range=[
-                max(0, df_sal["평균Net월급"].min() * 0.85),
-                df_sal["평균Net월급"].max() * 1.15,
-            ],
-        ),
-        bargap=0.35,
-        height=460,
-        margin=dict(t=50, b=50, l=60, r=20),
-        hoverlabel=dict(bgcolor="white", font_size=13),
-        title_font_size=15,
-    )
-    st.plotly_chart(fig_sal, use_container_width=True)
-
-# ── 지역별 / 진료과별 전체 순위 (참고용) ──────────────────────────────────
-_spec_label = selected_specialty if selected_specialty != "전체" else "전체 진료과"
-_expander_title = (
-    f"📊 지역별 · 진료과별 평균 순위 보기  |  진료과: {_spec_label}"
-    if selected_specialty != "전체"
-    else "📊 지역별 · 진료과별 평균 순위 보기"
-)
-
-with st.expander(_expander_title):
-    df_rank_r, df_rank_s = load_salary_ranking(selected_region, selected_specialty)
-    tab_r, tab_s = st.tabs(["📍 지역별", "🩺 진료과별"])
-
-    with tab_r:
-        if df_rank_r.empty:
-            st.info("데이터가 없습니다.")
-        else:
-            st.caption(
-                f"진료과 기준: **{_spec_label}** "
-                f"{'· 해당 진료과 공고만 집계' if selected_specialty != '전체' else '· 전체 진료과 공고 집계'}"
-            )
-            df_plot_r = df_rank_r.head(17).sort_values("평균Net월급")
-            fig_r = px.bar(
-                df_plot_r,
-                x="평균Net월급", y="지역", orientation="h",
-                text=df_plot_r["평균Net월급"].apply(lambda v: f"{int(v):,}만원"),
-                custom_data=["공고수"],
-                color="평균Net월급", color_continuous_scale="Blues",
-                title=f"지역별 평균 Net 월급 ({_spec_label})",
-            )
-            fig_r.update_traces(
-                textposition="outside", textfont_size=11,
-                hovertemplate=(
-                    "<b>%{y}</b><br>평균 Net 월급: <b>%{x:,}만원</b><br>"
-                    "집계 공고: %{customdata[0]}건<extra></extra>"
-                ),
-            )
-            fig_r.update_layout(
-                xaxis_title="평균 Net 월급 (만원)", yaxis_title="",
-                plot_bgcolor="white", xaxis=dict(gridcolor="#eeeeee"),
-                coloraxis_showscale=False,
-                height=max(300, len(df_plot_r) * 36),
-                margin=dict(t=40, b=40, l=10, r=80),
-                title_font_size=14,
-            )
-            st.plotly_chart(fig_r, use_container_width=True)
-
-    with tab_s:
-        if df_rank_s.empty:
-            st.info("데이터가 없습니다.")
-        else:
-            df_plot_s = df_rank_s.head(20).sort_values("평균Net월급")
-            fig_s = px.bar(
-                df_plot_s,
-                x="평균Net월급", y="진료과", orientation="h",
-                text=df_plot_s["평균Net월급"].apply(lambda v: f"{int(v):,}만원"),
-                custom_data=["공고수"],
-                color="평균Net월급", color_continuous_scale="Greens",
-            )
-            fig_s.update_traces(
-                textposition="outside", textfont_size=11,
-                hovertemplate=(
-                    "<b>%{y}</b><br>평균 Net 월급: <b>%{x:,}만원</b><br>"
-                    "집계 공고: %{customdata[0]}건<extra></extra>"
-                ),
-            )
-            fig_s.update_layout(
-                xaxis_title="평균 Net 월급 (만원)", yaxis_title="",
-                plot_bgcolor="white", xaxis=dict(gridcolor="#eeeeee"),
-                coloraxis_showscale=False,
-                height=max(300, len(df_plot_s) * 36),
-                margin=dict(t=10, b=40, l=10, r=80),
-            )
-            st.plotly_chart(fig_s, use_container_width=True)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 마취통증의학과 장기 트렌드 — 엑셀(과거) + DB(크롤링) 통합
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-if selected_specialty == "마취통증의학과":
     st.divider()
-    st.subheader("💉 마취통증의학과 장기 트렌드 (엑셀 과거자료 + DB 통합)")
-    _region_label = selected_region if selected_region != "전체" else "전국"
+
+    if df_monthly.empty:
+        st.warning("선택한 조건에 해당하는 데이터가 없습니다.")
+    else:
+        fig = px.bar(
+            df_monthly,
+            x="reg_month", y="post_count", text="post_count",
+            labels={"reg_month": "등록 월", "post_count": "공고 수"},
+            color_discrete_sequence=["#2196F3"],
+            category_orders={"reg_month": sorted(df_monthly["reg_month"].tolist())},
+        )
+        fig.update_traces(
+            textposition="outside", textfont_size=12,
+            hovertemplate="<b>%{x}</b><br>공고 수: <b>%{y}건</b>  ← 클릭하세요<extra></extra>",
+        )
+        fig.update_layout(
+            xaxis_title="등록 월", yaxis_title="공고 수",
+            plot_bgcolor="white",
+            xaxis=dict(tickangle=-30, type="category"),
+            yaxis=dict(gridcolor="#eeeeee", zeroline=True,
+                       range=[0, df_monthly["post_count"].max() * 1.25]),
+            bargap=0.35, height=460,
+            margin=dict(t=30, b=50, l=50, r=20),
+            hoverlabel=dict(bgcolor="white", font_size=13),
+            clickmode="event",
+        )
+        event = st.plotly_chart(
+            fig, use_container_width=True,
+            on_select="rerun", selection_mode="points", key="bar_chart",
+        )
+        points = event.selection.get("points", []) if event.selection else []
+        if points:
+            clicked_month = str(points[0].get("x", ""))
+            if clicked_month:
+                show_hospital_dialog(
+                    clicked_month, selected_region,
+                    selected_specialty, selected_employment,
+                )
+
+    # ── 상세 데이터 테이블 ─────────────────────────────────────────────────
+    with st.expander("📋 상세 데이터 테이블 보기"):
+        if df_emp.empty:
+            st.info("데이터가 없습니다.")
+        else:
+            st.dataframe(
+                df_emp.sort_values(["reg_month", "region", "specialty"])
+                .rename(columns={
+                    "region": "지역", "specialty": "진료과",
+                    "employment_type": "고용형태",
+                    "reg_month": "등록 월", "post_count": "공고 수",
+                })
+                .reset_index(drop=True),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── 급여 현황 — 월별 Net 월급 추이 ────────────────────────────────────
+    st.divider()
+    st.subheader("💰 급여 현황 — 월별 평균 Net 월급 추이 (봉직의)")
     st.caption(
-        f"엑셀: 2023-03 ~ 2026-01 (수동 수집 · Net 월급 기준) │ "
-        f"DB: 크롤링 데이터 (net/monthly 공고만 급여 집계) │ "
-        f"겹치는 월: 병원명 기준 중복 제거 후 단일 막대 (엑셀 급여 우선) │ "
-        f"지역: **{_region_label}**"
+        "봉직의 공고 한정 · Net 월급 기준 · 인센티브 비포함 · 협의/미기재 공고 제외 · "
+        "15건 이상 그룹: IQR 이상치 제거 후 평균 · 15건 미만 그룹: 중앙값"
     )
 
-    df_combined = load_machwi_combined(selected_region)
+    df_sal = load_salary_monthly(selected_region, selected_specialty)
 
-    if df_combined.empty:
-        st.warning("마취통증의학과 데이터를 불러올 수 없습니다.")
+    sk1, sk2, sk3 = st.columns(3)
+    if not df_sal.empty:
+        total_cnt   = int(df_sal["공고수"].sum())
+        overall_avg = int(
+            (df_sal["평균Net월급"] * df_sal["공고수"]).sum() / df_sal["공고수"].sum()
+        )
+        peak = df_sal.loc[df_sal["평균Net월급"].idxmax()]
+        sk1.metric("집계 공고 수",  f"{total_cnt:,}건")
+        sk2.metric("전체 기간 평균", f"{overall_avg:,}만원")
+        sk3.metric("최고 평균 월",  f"{peak['등록월']} ({int(peak['평균Net월급']):,}만원)")
     else:
-        # ── KPI 카드 ───────────────────────────────────────────────────────
-        xls_rows = df_combined[df_combined["출처"] == "엑셀(과거)"]
-        dbc_rows = df_combined[df_combined["출처"] == "DB(크롤링)"]
-        kc1, kc2, kc3, kc4 = st.columns(4)
-        kc1.metric("총 수집 개월수", f"{len(df_combined)}개월")
-        kc2.metric("엑셀 / DB 개월수", f"{len(xls_rows)} / {len(dbc_rows)}")
-        sal_rows = df_combined.dropna(subset=["평균Net월급"])
-        if not sal_rows.empty:
-            w_avg = int(
-                (sal_rows["평균Net월급"] * sal_rows["공고수"]).sum()
-                / sal_rows["공고수"].sum()
-            )
-            kc3.metric("전체 가중 평균 Net 월급", f"{w_avg:,}만원")
-        else:
-            kc3.metric("전체 가중 평균 Net 월급", "-")
-        kc4.metric("총 공고수", f"{df_combined['공고수'].sum():,}건")
+        sk1.metric("집계 공고 수",  "-")
+        sk2.metric("전체 기간 평균", "-")
+        sk3.metric("최고 평균 월",  "-")
 
-        st.divider()
+    st.divider()
 
-        COLOR_XLS = "#2196F3"
-        COLOR_DBC = "#FF9800"
-        ANNOT_STYLE = dict(
-            xref="paper", yref="paper",
-            showarrow=False,
-            font=dict(color="red", size=12, family="Arial"),
-            align="left",
-            bgcolor="rgba(255,255,255,0.85)",
-            bordercolor="red",
-            borderwidth=1,
-            borderpad=5,
+    if df_sal.empty:
+        st.info("선택한 조건에 해당하는 급여 데이터가 없습니다.")
+    else:
+        region_label    = selected_region    if selected_region    != "전체" else "전국"
+        specialty_label = selected_specialty if selected_specialty != "전체" else "전체 진료과"
+        fig_sal = px.bar(
+            df_sal, x="등록월", y="평균Net월급",
+            text=df_sal["평균Net월급"].apply(lambda v: f"{int(v):,}만원"),
+            custom_data=["공고수"],
+            color_discrete_sequence=["#43A047"],
+            category_orders={"등록월": sorted(df_sal["등록월"].tolist())},
+            title=f"{region_label} · {specialty_label} 월별 평균 Net 월급",
         )
-
-        # 차트용 출처 표시: "엑셀(과거)" → "A", "DB(크롤링)" → "B"
-        df_plot = df_combined.copy()
-        df_plot["출처"] = df_plot["출처"].replace({"엑셀(과거)": "A", "DB(크롤링)": "B"})
-
-        # ── 차트 1: 월별 구인 공고수 ──────────────────────────────────────
-        st.markdown("#### 📊 월별 구인 공고수")
-        fig_cnt = px.bar(
-            df_plot,
-            x="등록월", y="공고수",
-            color="출처",
-            color_discrete_map={"A": COLOR_XLS, "B": COLOR_DBC},
-            text="공고수",
-            barmode="group",
-        )
-        fig_cnt.update_traces(textposition="outside")
-
-        # 공고수 12개월 이동평균 추세선
-        show_ma_cnt = st.checkbox("추세선 표시 (12개월 이동평균)", value=True, key="ma_cnt")
-        if show_ma_cnt:
-            _cnt_ma = (
-                df_plot.sort_values("등록월")[["등록월", "공고수"]]
-                .assign(MA=lambda d: d["공고수"].rolling(12, min_periods=3).mean().round(1))
-            )
-            fig_cnt.add_trace(go.Scatter(
-                x=_cnt_ma["등록월"],
-                y=_cnt_ma["MA"],
-                mode="lines",
-                name="추세선 (12개월 MA)",
-                line=dict(color="#000000", width=2.5),
-                hovertemplate="<b>%{x}</b><br>이동평균: <b>%{y:.1f}건</b><extra></extra>",
-            ))
-
-        fig_cnt.update_layout(
-            xaxis=dict(title="등록 월", tickangle=-30, type="category",
-                       categoryorder="category ascending"),
-            yaxis=dict(title="공고 수", gridcolor="#eeeeee", zeroline=True),
-            plot_bgcolor="white",
-            bargap=0.25, bargroupgap=0.1, height=450,
-            margin=dict(t=20, b=60, l=50, r=20),
-            legend=dict(title="", orientation="h", yanchor="bottom", y=1.02,
-                        xanchor="right", x=1),
-            hoverlabel=dict(bgcolor="white", font_size=13),
-        )
-        fig_cnt.add_annotation(
-            x=0.01, y=0.97,
-            text="A: 인센티브 포함(+200만원)　B: 인센티브 비포함",
-            **ANNOT_STYLE,
-        )
-        st.plotly_chart(fig_cnt, use_container_width=True)
-
-        # ── 차트 2: 월별 평균 Net 월급 ────────────────────────────────────
-        st.markdown("#### 💰 월별 평균 Net 월급 추이")
-        adjust_incentive = st.checkbox(
-            "인센티브 보정 적용 — B에 +200만원 추가 (A와 비교 가능한 수준으로 보정)",
-            value=True,
-        )
-        st.caption("A: 공고 기재 급여 평균 (인센티브 포함) │ B: net/monthly 공고만 집계 (인센티브 미포함)")
-
-        df_sal = df_plot.dropna(subset=["평균Net월급"]).sort_values("등록월").copy()
-
-        # 인센티브 보정: B 계열에 +200 적용
-        if adjust_incentive:
-            df_sal.loc[df_sal["출처"] == "B", "평균Net월급"] += 200
-
-        d_a = df_sal[df_sal["출처"] == "A"]
-        d_b = df_sal[df_sal["출처"] == "B"]
-        b_label = "B (+200 보정)" if adjust_incentive else "B"
-
-        fig_sal = go.Figure()
-        for d, src, label, color, dash in [
-            (d_a, "A", "A",      COLOR_XLS, "solid"),
-            (d_b, "B", b_label,  COLOR_DBC, "dash"),
-        ]:
-            if d.empty:
-                continue
-            fig_sal.add_trace(go.Scatter(
-                x=d["등록월"],
-                y=d["평균Net월급"],
-                mode="lines+markers+text",
-                name=label,
-                line=dict(color=color, width=2, dash=dash),
-                marker=dict(size=7),
-                text=d["평균Net월급"].apply(lambda v: f"{int(v):,}"),
-                textposition="top center",
-                textfont=dict(size=10, color=color),
-                hovertemplate=(
-                    f"<b>%{{x}}</b><br>평균 Net 월급: <b>%{{y:,}}만원</b> [{label}]<extra></extra>"
-                ),
-            ))
-
-        # ── A-B 연결선 (마지막 A점 → 첫 번째 B점) ───────────────────────────
-        if not d_a.empty and not d_b.empty:
-            last_a  = d_a.iloc[-1]
-            first_b = d_b.iloc[0]
-            fig_sal.add_trace(go.Scatter(
-                x=[last_a["등록월"], first_b["등록월"]],
-                y=[last_a["평균Net월급"], first_b["평균Net월급"]],
-                mode="lines",
-                line=dict(color="gray", width=1.5, dash="dot"),
-                showlegend=False,
-                hoverinfo="skip",
-            ))
-
-        # ── 급여 12개월 이동평균 추세선 ────────────────────────────────────────
-        show_ma_sal = st.checkbox("추세선 표시 (12개월 이동평균)", value=True, key="ma_sal")
-        if show_ma_sal:
-            _sal_ma = (
-                df_sal.sort_values("등록월")[["등록월", "평균Net월급"]]
-                .assign(MA=lambda d: d["평균Net월급"].rolling(12, min_periods=3).mean().round(0))
-            )
-            fig_sal.add_trace(go.Scatter(
-                x=_sal_ma["등록월"],
-                y=_sal_ma["MA"],
-                mode="lines",
-                name="추세선 (12개월 MA)",
-                line=dict(color="#000000", width=2.5),
-                hovertemplate="<b>%{x}</b><br>이동평균: <b>%{y:,.0f}만원</b><extra></extra>",
-            ))
-
-        all_vals = df_sal["평균Net월급"].tolist()
-        y_min = max(0, min(all_vals) * 0.90) if all_vals else 0
-        y_max = max(all_vals) * 1.12         if all_vals else 5000
-        annot_sal = (
-            "A: 인센티브 포함　　B: +200만원 보정 적용"
-            if adjust_incentive else
-            "A: 인센티브 포함(+200만원)　B: 인센티브 비포함"
+        fig_sal.update_traces(
+            textposition="outside", textfont_size=12,
+            hovertemplate=(
+                "<b>%{x}</b><br>평균 Net 월급: <b>%{y:,}만원</b><br>"
+                "집계 공고: %{customdata[0]}건<extra></extra>"
+            ),
         )
         fig_sal.update_layout(
-            xaxis=dict(title="등록 월", tickangle=-30, type="category",
-                       categoryorder="category ascending"),
-            yaxis=dict(title="평균 Net 월급 (만원)", gridcolor="#eeeeee",
-                       zeroline=False, range=[y_min, y_max]),
-            plot_bgcolor="white", height=460,
-            margin=dict(t=20, b=60, l=60, r=20),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            xaxis_title="등록 월", yaxis_title="평균 Net 월급 (만원)",
+            plot_bgcolor="white",
+            xaxis=dict(tickangle=-30, type="category"),
+            yaxis=dict(gridcolor="#eeeeee", zeroline=True,
+                       range=[max(0, df_sal["평균Net월급"].min() * 0.85),
+                              df_sal["평균Net월급"].max() * 1.15]),
+            bargap=0.35, height=460,
+            margin=dict(t=50, b=50, l=60, r=20),
             hoverlabel=dict(bgcolor="white", font_size=13),
-        )
-        fig_sal.add_annotation(
-            x=0.01, y=0.97,
-            text=annot_sal,
-            **ANNOT_STYLE,
+            title_font_size=15,
         )
         st.plotly_chart(fig_sal, use_container_width=True)
+
+    # ── 지역별 / 진료과별 순위 expander ───────────────────────────────────
+    _spec_label = selected_specialty if selected_specialty != "전체" else "전체 진료과"
+    _expander_title = (
+        f"📊 지역별 · 진료과별 평균 순위 보기  |  진료과: {_spec_label}"
+        if selected_specialty != "전체"
+        else "📊 지역별 · 진료과별 평균 순위 보기"
+    )
+    with st.expander(_expander_title):
+        df_rank_r, df_rank_s = load_salary_ranking(selected_region, selected_specialty)
+        tab_r, tab_s = st.tabs(["📍 지역별", "🩺 진료과별"])
+
+        with tab_r:
+            if df_rank_r.empty:
+                st.info("데이터가 없습니다.")
+            else:
+                st.caption(
+                    f"진료과 기준: **{_spec_label}** "
+                    f"{'· 해당 진료과 공고만 집계' if selected_specialty != '전체' else '· 전체 진료과 공고 집계'}"
+                )
+                df_plot_r = df_rank_r.head(17).sort_values("평균Net월급")
+                fig_r = px.bar(
+                    df_plot_r,
+                    x="평균Net월급", y="지역", orientation="h",
+                    text=df_plot_r["평균Net월급"].apply(lambda v: f"{int(v):,}만원"),
+                    custom_data=["공고수"],
+                    color="평균Net월급", color_continuous_scale="Blues",
+                    title=f"지역별 평균 Net 월급 ({_spec_label})",
+                )
+                fig_r.update_traces(
+                    textposition="outside", textfont_size=11,
+                    hovertemplate=(
+                        "<b>%{y}</b><br>평균 Net 월급: <b>%{x:,}만원</b><br>"
+                        "집계 공고: %{customdata[0]}건<extra></extra>"
+                    ),
+                )
+                fig_r.update_layout(
+                    xaxis_title="평균 Net 월급 (만원)", yaxis_title="",
+                    plot_bgcolor="white", xaxis=dict(gridcolor="#eeeeee"),
+                    coloraxis_showscale=False,
+                    height=max(300, len(df_plot_r) * 36),
+                    margin=dict(t=40, b=40, l=10, r=80), title_font_size=14,
+                )
+                st.plotly_chart(fig_r, use_container_width=True)
+
+        with tab_s:
+            if df_rank_s.empty:
+                st.info("데이터가 없습니다.")
+            else:
+                df_plot_s = df_rank_s.head(20).sort_values("평균Net월급")
+                fig_s = px.bar(
+                    df_plot_s,
+                    x="평균Net월급", y="진료과", orientation="h",
+                    text=df_plot_s["평균Net월급"].apply(lambda v: f"{int(v):,}만원"),
+                    custom_data=["공고수"],
+                    color="평균Net월급", color_continuous_scale="Greens",
+                )
+                fig_s.update_traces(
+                    textposition="outside", textfont_size=11,
+                    hovertemplate=(
+                        "<b>%{y}</b><br>평균 Net 월급: <b>%{x:,}만원</b><br>"
+                        "집계 공고: %{customdata[0]}건<extra></extra>"
+                    ),
+                )
+                fig_s.update_layout(
+                    xaxis_title="평균 Net 월급 (만원)", yaxis_title="",
+                    plot_bgcolor="white", xaxis=dict(gridcolor="#eeeeee"),
+                    coloraxis_showscale=False,
+                    height=max(300, len(df_plot_s) * 36),
+                    margin=dict(t=10, b=40, l=10, r=80),
+                )
+                st.plotly_chart(fig_s, use_container_width=True)
+
+    # ── 마취통증의학과 장기 트렌드 ────────────────────────────────────────
+    if selected_specialty == "마취통증의학과":
+        st.divider()
+        st.subheader("💉 마취통증의학과 장기 트렌드 (엑셀 과거자료 + DB 통합)")
+        _region_label = selected_region if selected_region != "전체" else "전국"
+        st.caption(
+            f"엑셀: 2023-03 ~ 2026-01 (수동 수집 · Net 월급 기준) │ "
+            f"DB: 크롤링 데이터 (net/monthly 공고만 급여 집계) │ "
+            f"겹치는 월: 병원명 기준 중복 제거 후 단일 막대 (엑셀 급여 우선) │ "
+            f"지역: **{_region_label}**"
+        )
+        df_combined = load_machwi_combined(selected_region)
+
+        if df_combined.empty:
+            st.warning("마취통증의학과 데이터를 불러올 수 없습니다.")
+        else:
+            xls_rows = df_combined[df_combined["출처"] == "엑셀(과거)"]
+            dbc_rows = df_combined[df_combined["출처"] == "DB(크롤링)"]
+            kc1, kc2, kc3, kc4 = st.columns(4)
+            kc1.metric("총 수집 개월수", f"{len(df_combined)}개월")
+            kc2.metric("엑셀 / DB 개월수", f"{len(xls_rows)} / {len(dbc_rows)}")
+            sal_rows = df_combined.dropna(subset=["평균Net월급"])
+            if not sal_rows.empty:
+                w_avg = int(
+                    (sal_rows["평균Net월급"] * sal_rows["공고수"]).sum()
+                    / sal_rows["공고수"].sum()
+                )
+                kc3.metric("전체 가중 평균 Net 월급", f"{w_avg:,}만원")
+            else:
+                kc3.metric("전체 가중 평균 Net 월급", "-")
+            kc4.metric("총 공고수", f"{df_combined['공고수'].sum():,}건")
+
+            st.divider()
+            COLOR_XLS  = "#2196F3"
+            COLOR_DBC  = "#FF9800"
+            ANNOT_STYLE = dict(
+                xref="paper", yref="paper", showarrow=False,
+                font=dict(color="red", size=12, family="Arial"),
+                align="left", bgcolor="rgba(255,255,255,0.85)",
+                bordercolor="red", borderwidth=1, borderpad=5,
+            )
+
+            df_plot = df_combined.copy()
+            df_plot["출처"] = df_plot["출처"].replace({"엑셀(과거)": "A", "DB(크롤링)": "B"})
+
+            # 차트 1: 공고수
+            st.markdown("#### 📊 월별 구인 공고수")
+            fig_cnt = px.bar(
+                df_plot, x="등록월", y="공고수", color="출처",
+                color_discrete_map={"A": COLOR_XLS, "B": COLOR_DBC},
+                text="공고수", barmode="group",
+            )
+            fig_cnt.update_traces(textposition="outside")
+            show_ma_cnt = st.checkbox("추세선 표시 (12개월 이동평균)", value=True, key="ma_cnt")
+            if show_ma_cnt:
+                _cnt_ma = (
+                    df_plot.sort_values("등록월")[["등록월", "공고수"]]
+                    .assign(MA=lambda d: d["공고수"].rolling(12, min_periods=3).mean().round(1))
+                )
+                fig_cnt.add_trace(go.Scatter(
+                    x=_cnt_ma["등록월"], y=_cnt_ma["MA"],
+                    mode="lines", name="추세선 (12개월 MA)",
+                    line=dict(color="#000000", width=2.5),
+                    hovertemplate="<b>%{x}</b><br>이동평균: <b>%{y:.1f}건</b><extra></extra>",
+                ))
+            fig_cnt.update_layout(
+                xaxis=dict(title="등록 월", tickangle=-30, type="category",
+                           categoryorder="category ascending"),
+                yaxis=dict(title="공고 수", gridcolor="#eeeeee", zeroline=True),
+                plot_bgcolor="white", bargap=0.25, bargroupgap=0.1, height=450,
+                margin=dict(t=20, b=60, l=50, r=20),
+                legend=dict(title="", orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="right", x=1),
+                hoverlabel=dict(bgcolor="white", font_size=13),
+            )
+            fig_cnt.add_annotation(
+                x=0.01, y=0.97,
+                text="A: 인센티브 포함(+200만원)　B: 인센티브 비포함",
+                **ANNOT_STYLE,
+            )
+            st.plotly_chart(fig_cnt, use_container_width=True)
+
+            # 차트 2: 급여 추이
+            st.markdown("#### 💰 월별 평균 Net 월급 추이")
+            adjust_incentive = st.checkbox(
+                "인센티브 보정 적용 — B에 +200만원 추가 (A와 비교 가능한 수준으로 보정)",
+                value=True,
+            )
+            st.caption("A: 공고 기재 급여 평균 (인센티브 포함) │ B: net/monthly 공고만 집계 (인센티브 미포함)")
+
+            df_sal_m = df_plot.dropna(subset=["평균Net월급"]).sort_values("등록월").copy()
+            if adjust_incentive:
+                df_sal_m.loc[df_sal_m["출처"] == "B", "평균Net월급"] += 200
+
+            d_a = df_sal_m[df_sal_m["출처"] == "A"]
+            d_b = df_sal_m[df_sal_m["출처"] == "B"]
+            b_label = "B (+200 보정)" if adjust_incentive else "B"
+
+            fig_sal2 = go.Figure()
+            for d, label, color, dash in [
+                (d_a, "A",      COLOR_XLS, "solid"),
+                (d_b, b_label,  COLOR_DBC, "dash"),
+            ]:
+                if d.empty:
+                    continue
+                fig_sal2.add_trace(go.Scatter(
+                    x=d["등록월"], y=d["평균Net월급"],
+                    mode="lines+markers+text", name=label,
+                    line=dict(color=color, width=2, dash=dash),
+                    marker=dict(size=7),
+                    text=d["평균Net월급"].apply(lambda v: f"{int(v):,}"),
+                    textposition="top center",
+                    textfont=dict(size=10, color=color),
+                    hovertemplate=(
+                        f"<b>%{{x}}</b><br>평균 Net 월급: <b>%{{y:,}}만원</b> [{label}]<extra></extra>"
+                    ),
+                ))
+
+            if not d_a.empty and not d_b.empty:
+                fig_sal2.add_trace(go.Scatter(
+                    x=[d_a.iloc[-1]["등록월"], d_b.iloc[0]["등록월"]],
+                    y=[d_a.iloc[-1]["평균Net월급"], d_b.iloc[0]["평균Net월급"]],
+                    mode="lines",
+                    line=dict(color="gray", width=1.5, dash="dot"),
+                    showlegend=False, hoverinfo="skip",
+                ))
+
+            show_ma_sal = st.checkbox("추세선 표시 (12개월 이동평균)", value=True, key="ma_sal")
+            if show_ma_sal:
+                _sal_ma = (
+                    df_sal_m.sort_values("등록월")[["등록월", "평균Net월급"]]
+                    .assign(MA=lambda d: d["평균Net월급"].rolling(12, min_periods=3).mean().round(0))
+                )
+                fig_sal2.add_trace(go.Scatter(
+                    x=_sal_ma["등록월"], y=_sal_ma["MA"],
+                    mode="lines", name="추세선 (12개월 MA)",
+                    line=dict(color="#000000", width=2.5),
+                    hovertemplate="<b>%{x}</b><br>이동평균: <b>%{y:,.0f}만원</b><extra></extra>",
+                ))
+
+            all_vals = df_sal_m["평균Net월급"].tolist()
+            y_min = max(0, min(all_vals) * 0.90) if all_vals else 0
+            y_max = max(all_vals) * 1.12          if all_vals else 5000
+            annot_sal = (
+                "A: 인센티브 포함　　B: +200만원 보정 적용"
+                if adjust_incentive else
+                "A: 인센티브 포함(+200만원)　B: 인센티브 비포함"
+            )
+            fig_sal2.update_layout(
+                xaxis=dict(title="등록 월", tickangle=-30, type="category",
+                           categoryorder="category ascending"),
+                yaxis=dict(title="평균 Net 월급 (만원)", gridcolor="#eeeeee",
+                           zeroline=False, range=[y_min, y_max]),
+                plot_bgcolor="white", height=460,
+                margin=dict(t=20, b=60, l=60, r=20),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="right", x=1),
+                hoverlabel=dict(bgcolor="white", font_size=13),
+            )
+            fig_sal2.add_annotation(
+                x=0.01, y=0.97, text=annot_sal, **ANNOT_STYLE,
+            )
+            st.plotly_chart(fig_sal2, use_container_width=True)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Tab 2: 전국 지도 & 흐름 보기
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tab2:
+
+    if selected_specialty == "전체":
+        st.info(
+            "📌 **진료과를 선택하면 전국 흐름을 볼 수 있습니다.**\n\n"
+            "왼쪽 사이드바에서 특정 진료과(예: 마취통증의학과, 내과 등)를 선택하세요."
+        )
+    else:
+        # ── 고용형태 필터 (Tab2 독자) ──────────────────────────────────────
+        t2_col, _ = st.columns([2, 5])
+        with t2_col:
+            selected_emp_t2 = st.selectbox(
+                "👔 고용형태", EMPLOYMENT_TYPES, index=0, key="emp_filter_t2",
+            )
+
+        df_nat = load_national_trend(selected_specialty, selected_emp_t2)
+
+        if df_nat.empty:
+            st.warning("데이터가 없습니다. 다른 조건을 선택해 주세요.")
+        else:
+            sidos = sorted(df_nat["region_sido"].unique().tolist())
+            COLS  = 4
+
+            # ── 1단: 시도별 스몰 멀티플즈 ──────────────────────────────────
+            st.subheader(f"📊 시도별 월별 추이 — {selected_specialty}")
+            st.caption("막대 (좌측 Y): 구인 건수 · 꺾은선 (우측 Y): 평균 Net 페이 만원")
+
+            for i in range(0, len(sidos), COLS):
+                cols = st.columns(COLS)
+                for j, sido in enumerate(sidos[i:i + COLS]):
+                    d = df_nat[df_nat["region_sido"] == sido].sort_values("reg_month")
+                    with cols[j]:
+                        fig_m = go.Figure()
+                        fig_m.add_trace(go.Bar(
+                            x=d["reg_month"], y=d["cnt"],
+                            name="건수", marker_color="#90CAF9", yaxis="y",
+                            hovertemplate="%{x}<br>건수: <b>%{y}건</b><extra></extra>",
+                        ))
+                        d_pay = d.dropna(subset=["avg_pay"])
+                        if not d_pay.empty:
+                            fig_m.add_trace(go.Scatter(
+                                x=d_pay["reg_month"], y=d_pay["avg_pay"],
+                                name="평균페이", mode="lines+markers",
+                                marker=dict(size=4),
+                                line=dict(color="#E53935", width=1.5),
+                                yaxis="y2",
+                                hovertemplate="%{x}<br>페이: <b>%{y:,}만원</b><extra></extra>",
+                            ))
+                        fig_m.update_layout(
+                            title=dict(text=sido, font=dict(size=12, color="#333"), x=0.5),
+                            xaxis=dict(tickangle=-60, tickfont=dict(size=7),
+                                       type="category", nticks=6, showgrid=False),
+                            yaxis=dict(showgrid=True, gridcolor="#eeeeee",
+                                       tickfont=dict(size=8), title=""),
+                            yaxis2=dict(overlaying="y", side="right",
+                                        tickfont=dict(size=8), title="", showgrid=False),
+                            showlegend=False, height=200,
+                            margin=dict(t=28, b=40, l=30, r=30),
+                            plot_bgcolor="#fafafa",
+                        )
+                        st.plotly_chart(fig_m, width="stretch")
+
+            st.divider()
+
+            # ── 2단: 시도 선택 → 시군구별 스몰 멀티플즈 ───────────────────
+            st.subheader("🔍 시도 내 시군구별 상세 추이")
+            selected_sido = st.selectbox("시도 선택", sidos, key="sido_select_t2")
+
+            df_agg_t2 = df_all.copy()
+            if selected_specialty != "전체":
+                df_agg_t2 = df_agg_t2[df_agg_t2["specialty"] == selected_specialty]
+            if selected_emp_t2 != "전체":
+                df_agg_t2 = df_agg_t2[df_agg_t2["employment_type"] == selected_emp_t2]
+
+            sigungu_rows = df_agg_t2[
+                (df_agg_t2["region"].str.len() > 2) &
+                (df_agg_t2["region"].str.startswith(selected_sido))
+            ]
+            df_sg = (
+                sigungu_rows
+                .groupby(["region", "reg_month"])["post_count"].sum()
+                .reset_index()
+            )
+
+            if df_sg.empty:
+                st.info(f"**{selected_sido}** 내 시군구 단위 데이터가 없습니다.")
+            else:
+                sigungu_list = sorted(df_sg["region"].unique().tolist())
+                st.caption(f"{selected_sido} 내 {len(sigungu_list)}개 시군구")
+                for i in range(0, len(sigungu_list), COLS):
+                    cols = st.columns(COLS)
+                    for j, sg in enumerate(sigungu_list[i:i + COLS]):
+                        d = df_sg[df_sg["region"] == sg].sort_values("reg_month")
+                        with cols[j]:
+                            fig_sg = go.Figure()
+                            fig_sg.add_trace(go.Bar(
+                                x=d["reg_month"], y=d["post_count"],
+                                marker_color="#A5D6A7",
+                                hovertemplate="%{x}<br>건수: <b>%{y}건</b><extra></extra>",
+                            ))
+                            fig_sg.update_layout(
+                                title=dict(text=sg, font=dict(size=11, color="#333"), x=0.5),
+                                xaxis=dict(tickangle=-60, tickfont=dict(size=7),
+                                           type="category", nticks=6, showgrid=False),
+                                yaxis=dict(showgrid=True, gridcolor="#eeeeee",
+                                           tickfont=dict(size=8), title=""),
+                                showlegend=False, height=180,
+                                margin=dict(t=26, b=38, l=25, r=10),
+                                plot_bgcolor="#fafafa",
+                            )
+                            st.plotly_chart(fig_sg, width="stretch")
+
+            st.divider()
+
+            # ── 3단: 최신 2개월 버블 맵 ────────────────────────────────────
+            SIDO_COORDS = {
+                "서울": (37.5665, 126.9780), "부산": (35.1796, 129.0756),
+                "대구": (35.8714, 128.6014), "인천": (37.4563, 126.7052),
+                "광주": (35.1595, 126.8526), "대전": (36.3504, 127.3845),
+                "울산": (35.5384, 129.3114), "세종": (36.4800, 127.2890),
+                "경기": (37.4138, 127.5183), "강원": (37.8228, 128.1555),
+                "충북": (36.8000, 127.7000), "충남": (36.5184, 126.8000),
+                "전북": (35.7175, 127.1530), "전남": (34.8161, 126.4630),
+                "경북": (36.4919, 128.8889), "경남": (35.4606, 128.2132),
+                "제주": (33.4890, 126.4983),
+            }
+
+            all_months_nat = sorted(df_nat["reg_month"].unique().tolist())
+            recent_months  = all_months_nat[-2:] if len(all_months_nat) >= 2 else all_months_nat
+            month_label    = " · ".join(recent_months)
+
+            st.subheader(f"🗺️ 최신 동향 지도 ({month_label})")
+            st.caption("버블 크기 = 구인 건수 · 색상 = 평균 Net 페이 (파랑→빨강: 낮음→높음)")
+
+            df_recent = (
+                df_nat[df_nat["reg_month"].isin(recent_months)]
+                .groupby("region_sido")
+                .agg(cnt=("cnt", "sum"), avg_pay=("avg_pay", "mean"))
+                .reset_index()
+            )
+            df_recent["avg_pay"] = pd.to_numeric(
+                df_recent["avg_pay"], errors="coerce"
+            ).round(0)
+            df_recent["lat"] = df_recent["region_sido"].map(
+                lambda s: SIDO_COORDS.get(s, (None, None))[0]
+            )
+            df_recent["lon"] = df_recent["region_sido"].map(
+                lambda s: SIDO_COORDS.get(s, (None, None))[1]
+            )
+            df_recent = df_recent.dropna(subset=["lat", "lon"])
+
+            if df_recent.empty:
+                st.info("지도를 그릴 데이터가 없습니다.")
+            else:
+                cnt_min = df_recent["cnt"].min()
+                cnt_max = df_recent["cnt"].max()
+                if cnt_max > cnt_min:
+                    df_recent["bubble_size"] = (
+                        10 + (df_recent["cnt"] - cnt_min) / (cnt_max - cnt_min) * 40
+                    )
+                else:
+                    df_recent["bubble_size"] = 25
+
+                fig_map = go.Figure(go.Scattermapbox(
+                    lat=df_recent["lat"],
+                    lon=df_recent["lon"],
+                    mode="markers+text",
+                    marker=dict(
+                        size=df_recent["bubble_size"],
+                        color=df_recent["avg_pay"],
+                        colorscale="RdYlBu_r",
+                        showscale=True,
+                        colorbar=dict(title="평균페이<br>(만원)", thickness=12, len=0.6),
+                        sizemode="diameter",
+                        opacity=0.8,
+                    ),
+                    text=df_recent["region_sido"],
+                    textposition="top center",
+                    textfont=dict(size=11, color="black"),
+                    customdata=df_recent[["cnt", "avg_pay"]].fillna(0).values,
+                    hovertemplate=(
+                        "<b>%{text}</b><br>"
+                        "구인 건수: <b>%{customdata[0]:.0f}건</b><br>"
+                        "평균 Net 페이: <b>%{customdata[1]:,.0f}만원</b><extra></extra>"
+                    ),
+                ))
+                fig_map.update_layout(
+                    mapbox=dict(
+                        style="carto-positron",
+                        center=dict(lat=36.5, lon=127.8),
+                        zoom=5.8,
+                    ),
+                    height=540,
+                    margin=dict(t=10, b=0, l=0, r=0),
+                )
+                st.plotly_chart(fig_map, width="stretch")

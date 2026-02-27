@@ -228,6 +228,21 @@ salary_backfill.py  →  기존 DB 보완 전용 (1회성, 이미 완료)
 - **지역별**: 시도 단위 수평 막대그래프 (경기는 경기 전체로 집계)
 - **진료과별**: 5건 이상 진료과만 표시, 선택 지역 필터 연동
 
+### 탭 구조 (메인 콘텐츠)
+- **Tab 1 — 지역 상세 분석**: 기존 전체 기능 (구인건수 차트, 병원 팝업, 마취 트렌드, 급여 현황, 급여 순위)
+- **Tab 2 — 전국 지도 & 흐름 보기**: 특정 진료과 선택 시 활성화, 진료과=전체이면 안내 메시지 표시
+
+### Tab 2 — 전국 지도 & 흐름 보기
+- **고용형태 드롭다운**: 봉직의·대진의 등 별도 필터 (Tab 1과 독립)
+- **`load_national_trend(specialty, employment_type)`**: 시도·월 기준 집계 (건수+평균페이), 마취통증의학과 선택 시 `machwi_excel_history` 합산
+- **1단 — 시도별 small multiples** (4열 그리드, 높이 200px):
+  - 막대(파랑, Y좌축) = 건수 / 라인(빨강, Y우축) = 평균Net월급
+  - 데이터 없는 월은 건너뜀 (끊겨도 OK), 이중 Y축(`yaxis2` overlaying)
+- **2단 — 시군구별 small multiples**: 시도 selectbox 선택 후 해당 시도 내 시군구별 동일 패턴
+- **3단 — 전국 bubble map** (scatter_mapbox, carto-positron 무토큰):
+  - 최신 2개월 데이터 기준, 버블 크기=건수, 버블 색상=평균페이(RdYlBu_r 컬러스케일)
+  - 17개 시도 중심 좌표 하드코딩, 호버 툴팁 (시도명·건수·평균페이)
+
 ---
 
 ## ▶️ 실행 명령어
@@ -357,6 +372,14 @@ pip install matplotlib
 | | — 급여 임계값 상향: 1,000만원 → **1,300만원** (마취 DB: 650 기준) |
 | | — 사이드바 필터 개선: 지역·진료과 완전 독립 + 텍스트 검색/자동완성 |
 | | `PROJECT_GUIDE.md` — Supabase 이관 계획 섹션 추가 (엑셀→테이블 import 절차 포함) |
+| 2026-02-28 | **신기능** — Tab 2 "전국 지도 & 흐름 보기" 추가 (`app.py` 대규모 UI 개편) |
+| | — `st.tabs` 도입: Tab 1(지역 상세 분석) + Tab 2(전국 지도 & 흐름 보기) |
+| | — `load_national_trend(specialty, employment_type)`: 시도·월 집계 함수 추가 (마취과 엑셀 합산 포함) |
+| | — Tab 2 > 1단: 시도별 small multiples (4열, 이중Y축: 건수+평균페이, 높이200) |
+| | — Tab 2 > 2단: 시도 selectbox → 시군구별 small multiples |
+| | — Tab 2 > 3단: 전국 scatter_mapbox bubble map (최신 2개월, 무토큰 carto-positron) |
+| | — 진료과=전체 시 Tab 2 비활성화(안내 메시지) / 특정 진료과 선택 시만 표시 |
+| | — 데이터 없는 월 skip (차트 끊김 허용) |
 | 2026-02-27 (2) | **버그수정** — 병원 팝업 중복횟수 집계 오류 수정 (`load_hospitals`) |
 | | — 기존: 클릭된 월에 엑셀에도 등장한 DB 병원만 Excel 횟수 가산 (월 필터 버그) |
 | | — 수정: 전체 기간 Excel 집계 쿼리 분리 → DB 병원에 누적 Excel 횟수 정확히 반영 |
@@ -438,6 +461,7 @@ DB_URL = "postgresql+psycopg2://postgres:[비밀번호]@[프로젝트].supabase.
 - [x] 이상치 처리: 1,000만원 이하 제외 + IQR/중앙값
 - [x] 전 시도 시/군 단위 세분화 (경기수원·경북포항·경남창원 등, 사이드바·구인건수·급여 추이·병원팝업 모두 적용)
 - [x] `phase4_crawler.py` 수정 → 급여 통합 + `--info` / `--from` / `--to` 날짜 범위 옵션 추가
+- [x] **Tab 2 전국 지도 & 흐름 보기** — small multiples + bubble map 추가
 - [ ] `app.py` — Streamlit `use_container_width` → `width` 파라미터 교체
 - [ ] 크롤러 정기 자동 실행 (Windows 작업 스케줄러)
 - [ ] 마감 임박 공고 필터 기능 추가
