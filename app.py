@@ -43,8 +43,8 @@ def get_engine():
 # 마취통증의학과 전용 — 엑셀 + DB 병원 단위 통합 (1분 캐싱)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @st.cache_data(ttl=60)
-def load_machwi_combined() -> pd.DataFrame:
-    """엑셀 + DB 마취통증의학과 월별 데이터 통합.
+def load_machwi_combined(region: str = "전체") -> pd.DataFrame:
+    """엑셀 + DB 마취통증의학과 월별 데이터 통합 (지역 필터 지원).
 
     겹치는 월 (Excel·DB 모두 있는 경우):
       - hospital_name 기준으로 중복 제거
@@ -54,23 +54,46 @@ def load_machwi_combined() -> pd.DataFrame:
     Excel만 있는 월: '엑셀(과거)' (파랑)
     DB만 있는 월:   'DB(크롤링)' (주황)
     """
+    # ── 지역 필터 조건 생성 ────────────────────────────────────────────────────
+    xl_params: dict = {"source": "excel_import"}
+    db_params: dict = {}
+    xl_region_cond = ""
+    db_region_cond = ""
+
+    if region != "전체":
+        if len(region) > 2:          # 시도+시군 (예: 경기수원, 경북포항)
+            sido = region[:2]
+            city = region[2:]
+            db_region_cond = "AND rp.region_sido = :sido AND rp.region LIKE :region_like"
+            db_params["sido"]        = sido
+            db_params["region_like"] = f"{sido} {city}%"
+            # Excel region 형식 불일치 가능성 → 시도 단위로 필터
+            xl_region_cond  = "AND meh.region LIKE :xl_sido || '%'"
+            xl_params["xl_sido"] = sido
+        else:                         # 시도 단위 (예: 서울, 경기)
+            db_region_cond  = "AND rp.region_sido = :sido"
+            db_params["sido"] = region
+            xl_region_cond  = "AND meh.region LIKE :xl_sido || '%'"
+            xl_params["xl_sido"] = region
+
     try:
         with get_engine().connect() as conn:
             # 엑셀 raw: 병원 단위
-            df_xls = pd.read_sql(text("""
-                SELECT reg_month, hospital_name, net_pay
-                FROM   machwi_excel_history
-                WHERE  source = 'excel_import'
-            """), conn)
+            df_xls = pd.read_sql(text(f"""
+                SELECT meh.reg_month, meh.hospital_name, meh.net_pay
+                FROM   machwi_excel_history meh
+                WHERE  meh.source = :source
+                {xl_region_cond}
+            """), conn, params=xl_params)
             # DB raw: 병원 단위 (DISTINCT로 중복 진료과 제거)
-            df_db = pd.read_sql(text("""
+            df_db = pd.read_sql(text(f"""
                 SELECT DISTINCT
                     LEFT(rp.register_date, 7) AS reg_month,
                     rp.hospital_name,
                     CASE WHEN rp.salary_type = 'net'
                               AND rp.salary_unit = 'monthly'
-                              AND rp.salary_net_min > 500
-                              AND rp.salary_net_max > 500
+                              AND rp.salary_net_min > 650
+                              AND rp.salary_net_max > 650
                          THEN (rp.salary_net_min + rp.salary_net_max) / 2.0
                          ELSE NULL END AS net_pay
                 FROM  recruit_posts rp
@@ -78,7 +101,8 @@ def load_machwi_combined() -> pd.DataFrame:
                 WHERE rps.specialty LIKE '%마취%'
                   AND rp.register_date IS NOT NULL
                   AND rp.register_date <> ''
-            """), conn)
+                  {db_region_cond}
+            """), conn, params=db_params)
     except Exception as e:
         st.error(f"마취통증 통합 데이터 조회 오류: {e}")
         return pd.DataFrame()
@@ -151,7 +175,7 @@ def load_salary_monthly(region: str, specialty: str) -> pd.DataFrame:
         "rp.register_date IS NOT NULL",
         "rp.register_date <> ''",
         "rp.employment_type = '봉직의'",
-        "(rp.salary_net_min + rp.salary_net_max) / 2.0 > 1000",
+        "(rp.salary_net_min + rp.salary_net_max) / 2.0 > 1300",
     ]
     params: dict = {}
     need_join = specialty != "전체"
@@ -228,7 +252,7 @@ def load_salary_ranking(region: str, specialty: str) -> tuple:
         "rp.salary_net_min IS NOT NULL",
         "rp.salary_net_max IS NOT NULL",
         "rp.employment_type = '봉직의'",
-        "(rp.salary_net_min + rp.salary_net_max) / 2.0 > 1000",
+        "(rp.salary_net_min + rp.salary_net_max) / 2.0 > 1300",
     ]
     if region != "전체":
         if len(region) > 2:  # 시도+시군 조합 (예: 경기수원, 경북포항)
@@ -740,17 +764,45 @@ with st.sidebar:
         st.warning("데이터가 없거나 DB 연결에 실패했습니다.")
         st.stop()
 
-    region_options  = ["전체"] + sorted(df_all["region"].dropna().unique().tolist())
-    selected_region = st.selectbox("📍 지역", region_options)
+    # 전체 목록 (지역·진료과 서로 독립 — 상호 종속 없음)
+    _all_regions     = ["전체"] + sorted(df_all["region"].dropna().unique().tolist())
+    _all_specialties = ["전체"] + sorted(df_all["specialty"].dropna().unique().tolist())
 
-    if selected_region == "전체":
-        specialty_pool = sorted(df_all["specialty"].dropna().unique().tolist())
-    else:
-        specialty_pool = sorted(
-            df_all[df_all["region"] == selected_region]["specialty"]
-            .dropna().unique().tolist()
-        )
-    selected_specialty = st.selectbox("🩺 진료과", ["전체"] + specialty_pool)
+    # ── 지역 검색 + 드롭다운 ─────────────────────────────────────────────────
+    st.markdown("**📍 지역**")
+    _region_q = st.text_input(
+        "지역 검색", key="region_q",
+        placeholder="예: 서울, 경기수원, 부산…",
+        label_visibility="collapsed",
+    )
+    _region_q_strip = _region_q.strip()
+    _region_opts = (
+        [r for r in _all_regions if _region_q_strip in r]
+        if _region_q_strip else _all_regions
+    ) or ["전체"]
+
+    selected_region = st.selectbox(
+        "지역 선택", _region_opts,
+        key="region_box", label_visibility="collapsed",
+    )
+
+    # ── 진료과 검색 + 드롭다운 ───────────────────────────────────────────────
+    st.markdown("**🩺 진료과**")
+    _spec_q = st.text_input(
+        "진료과 검색", key="specialty_q",
+        placeholder="예: 마취, 내과, 정형외과…",
+        label_visibility="collapsed",
+    )
+    _spec_q_strip = _spec_q.strip()
+    _spec_opts = (
+        [s for s in _all_specialties if _spec_q_strip in s]
+        if _spec_q_strip else _all_specialties
+    ) or ["전체"]
+
+    selected_specialty = st.selectbox(
+        "진료과 선택", _spec_opts,
+        key="specialty_box", label_visibility="collapsed",
+    )
 
     st.divider()
     if st.button("🔄 데이터 새로고침"):
@@ -1059,13 +1111,15 @@ with st.expander(_expander_title):
 if selected_specialty == "마취통증의학과":
     st.divider()
     st.subheader("💉 마취통증의학과 장기 트렌드 (엑셀 과거자료 + DB 통합)")
+    _region_label = selected_region if selected_region != "전체" else "전국"
     st.caption(
-        "엑셀: 2023-03 ~ 2026-01 (수동 수집 · Net 월급 기준) │ "
-        "DB: 크롤링 데이터 (net/monthly 공고만 급여 집계) │ "
-        "겹치는 월: 병원명 기준 중복 제거 후 단일 막대 (엑셀 급여 우선)"
+        f"엑셀: 2023-03 ~ 2026-01 (수동 수집 · Net 월급 기준) │ "
+        f"DB: 크롤링 데이터 (net/monthly 공고만 급여 집계) │ "
+        f"겹치는 월: 병원명 기준 중복 제거 후 단일 막대 (엑셀 급여 우선) │ "
+        f"지역: **{_region_label}**"
     )
 
-    df_combined = load_machwi_combined()
+    df_combined = load_machwi_combined(selected_region)
 
     if df_combined.empty:
         st.warning("마취통증의학과 데이터를 불러올 수 없습니다.")
@@ -1117,6 +1171,23 @@ if selected_specialty == "마취통증의학과":
             barmode="group",
         )
         fig_cnt.update_traces(textposition="outside")
+
+        # 공고수 12개월 이동평균 추세선
+        show_ma_cnt = st.checkbox("추세선 표시 (12개월 이동평균)", value=True, key="ma_cnt")
+        if show_ma_cnt:
+            _cnt_ma = (
+                df_plot.sort_values("등록월")[["등록월", "공고수"]]
+                .assign(MA=lambda d: d["공고수"].rolling(12, min_periods=3).mean().round(1))
+            )
+            fig_cnt.add_trace(go.Scatter(
+                x=_cnt_ma["등록월"],
+                y=_cnt_ma["MA"],
+                mode="lines",
+                name="추세선 (12개월 MA)",
+                line=dict(color="#000000", width=2.5),
+                hovertemplate="<b>%{x}</b><br>이동평균: <b>%{y:.1f}건</b><extra></extra>",
+            ))
+
         fig_cnt.update_layout(
             xaxis=dict(title="등록 월", tickangle=-30, type="category",
                        categoryorder="category ascending"),
@@ -1124,7 +1195,7 @@ if selected_specialty == "마취통증의학과":
             plot_bgcolor="white",
             bargap=0.25, bargroupgap=0.1, height=450,
             margin=dict(t=20, b=60, l=50, r=20),
-            legend=dict(title="출처", orientation="h", yanchor="bottom", y=1.02,
+            legend=dict(title="", orientation="h", yanchor="bottom", y=1.02,
                         xanchor="right", x=1),
             hoverlabel=dict(bgcolor="white", font_size=13),
         )
@@ -1137,33 +1208,81 @@ if selected_specialty == "마취통증의학과":
 
         # ── 차트 2: 월별 평균 Net 월급 ────────────────────────────────────
         st.markdown("#### 💰 월별 평균 Net 월급 추이")
-        st.caption("A: 공고 기재 급여 평균 │ B: net/monthly 공고만 집계 (협의·미기재 제외)")
-        df_sal = df_plot.dropna(subset=["평균Net월급"]).sort_values("등록월")
+        adjust_incentive = st.checkbox(
+            "인센티브 보정 적용 — B에 +200만원 추가 (A와 비교 가능한 수준으로 보정)",
+            value=True,
+        )
+        st.caption("A: 공고 기재 급여 평균 (인센티브 포함) │ B: net/monthly 공고만 집계 (인센티브 미포함)")
+
+        df_sal = df_plot.dropna(subset=["평균Net월급"]).sort_values("등록월").copy()
+
+        # 인센티브 보정: B 계열에 +200 적용
+        if adjust_incentive:
+            df_sal.loc[df_sal["출처"] == "B", "평균Net월급"] += 200
+
+        d_a = df_sal[df_sal["출처"] == "A"]
+        d_b = df_sal[df_sal["출처"] == "B"]
+        b_label = "B (+200 보정)" if adjust_incentive else "B"
+
         fig_sal = go.Figure()
-        for src, color, dash in [
-            ("A", COLOR_XLS, "solid"),
-            ("B", COLOR_DBC, "dash"),
+        for d, src, label, color, dash in [
+            (d_a, "A", "A",      COLOR_XLS, "solid"),
+            (d_b, "B", b_label,  COLOR_DBC, "dash"),
         ]:
-            d = df_sal[df_sal["출처"] == src]
             if d.empty:
                 continue
             fig_sal.add_trace(go.Scatter(
                 x=d["등록월"],
                 y=d["평균Net월급"],
                 mode="lines+markers+text",
-                name=src,
+                name=label,
                 line=dict(color=color, width=2, dash=dash),
                 marker=dict(size=7),
                 text=d["평균Net월급"].apply(lambda v: f"{int(v):,}"),
                 textposition="top center",
                 textfont=dict(size=10, color=color),
                 hovertemplate=(
-                    f"<b>%{{x}}</b><br>평균 Net 월급: <b>%{{y:,}}만원</b> [{src}]<extra></extra>"
+                    f"<b>%{{x}}</b><br>평균 Net 월급: <b>%{{y:,}}만원</b> [{label}]<extra></extra>"
                 ),
             ))
+
+        # ── A-B 연결선 (마지막 A점 → 첫 번째 B점) ───────────────────────────
+        if not d_a.empty and not d_b.empty:
+            last_a  = d_a.iloc[-1]
+            first_b = d_b.iloc[0]
+            fig_sal.add_trace(go.Scatter(
+                x=[last_a["등록월"], first_b["등록월"]],
+                y=[last_a["평균Net월급"], first_b["평균Net월급"]],
+                mode="lines",
+                line=dict(color="gray", width=1.5, dash="dot"),
+                showlegend=False,
+                hoverinfo="skip",
+            ))
+
+        # ── 급여 12개월 이동평균 추세선 ────────────────────────────────────────
+        show_ma_sal = st.checkbox("추세선 표시 (12개월 이동평균)", value=True, key="ma_sal")
+        if show_ma_sal:
+            _sal_ma = (
+                df_sal.sort_values("등록월")[["등록월", "평균Net월급"]]
+                .assign(MA=lambda d: d["평균Net월급"].rolling(12, min_periods=3).mean().round(0))
+            )
+            fig_sal.add_trace(go.Scatter(
+                x=_sal_ma["등록월"],
+                y=_sal_ma["MA"],
+                mode="lines",
+                name="추세선 (12개월 MA)",
+                line=dict(color="#000000", width=2.5),
+                hovertemplate="<b>%{x}</b><br>이동평균: <b>%{y:,.0f}만원</b><extra></extra>",
+            ))
+
         all_vals = df_sal["평균Net월급"].tolist()
         y_min = max(0, min(all_vals) * 0.90) if all_vals else 0
         y_max = max(all_vals) * 1.12         if all_vals else 5000
+        annot_sal = (
+            "A: 인센티브 포함　　B: +200만원 보정 적용"
+            if adjust_incentive else
+            "A: 인센티브 포함(+200만원)　B: 인센티브 비포함"
+        )
         fig_sal.update_layout(
             xaxis=dict(title="등록 월", tickangle=-30, type="category",
                        categoryorder="category ascending"),
@@ -1176,7 +1295,7 @@ if selected_specialty == "마취통증의학과":
         )
         fig_sal.add_annotation(
             x=0.01, y=0.97,
-            text="A: 인센티브 포함(+200만원)　B: 인센티브 비포함",
+            text=annot_sal,
             **ANNOT_STYLE,
         )
         st.plotly_chart(fig_sal, use_container_width=True)
