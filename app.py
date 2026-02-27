@@ -1,5 +1,5 @@
 """
-app.py  –  메디게이트 구인 트렌드 Streamlit 대시보드
+app.py  –  개원비밀공간 구인 트렌드 Streamlit 대시보드
 
 실행
 ----
@@ -23,7 +23,7 @@ from sqlalchemy import create_engine, text
 # 페이지 설정
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 st.set_page_config(
-    page_title="메디게이트 구인 트렌드",
+    page_title="개원비밀공간 구인 트렌드",
     page_icon="🏥",
     layout="wide",
 )
@@ -40,80 +40,103 @@ def get_engine():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 마취통증의학과 전용 — 엑셀 과거자료 로드 (1시간 캐싱)
+# 마취통증의학과 전용 — 엑셀 + DB 병원 단위 통합 (1분 캐싱)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-@st.cache_data(ttl=3600)
-def load_excel_machwi() -> pd.DataFrame:
-    """machwi_excel_history 테이블에서 월별 공고수 & 평균 Net 월급 집계.
-    원본: (마봉협)구인구직정리.xlsx → import_excel_to_db.py 로 1회 import 완료
-    source = 'excel_import' 태그로 DB에 저장되어 있음
-    """
-    sql = text("""
-        SELECT
-            reg_month          AS reg_month,
-            COUNT(*)           AS post_cnt,
-            ROUND(AVG(net_pay)) AS avg_net
-        FROM  machwi_excel_history
-        WHERE source = 'excel_import'
-        GROUP BY reg_month
-        ORDER BY reg_month
-    """)
-    try:
-        with get_engine().connect() as conn:
-            df = pd.read_sql(sql, conn)
-        df = df.rename(columns={"reg_month": "등록월", "post_cnt": "공고수", "avg_net": "평균Net월급"})
-        df["출처"] = "엑셀(과거)"
-        return df
-    except Exception as e:
-        st.error(f"엑셀 과거자료 조회 오류: {e}")
-        return pd.DataFrame()
-
-
 @st.cache_data(ttl=60)
-def load_db_machwi() -> pd.DataFrame:
-    """DB에서 마취통증의학과 월별 공고수 & 평균 Net 월급 추출.
-    - 공고수: 전체 마취통증의학과 공고 (급여 여부 무관)
-    - 평균Net월급: salary_type=net, salary_unit=monthly, >500만원 한정
+def load_machwi_combined() -> pd.DataFrame:
+    """엑셀 + DB 마취통증의학과 월별 데이터 통합.
+
+    겹치는 월 (Excel·DB 모두 있는 경우):
+      - hospital_name 기준으로 중복 제거
+      - 동일 병원은 Excel 급여 우선 사용
+      - DB에만 있는 병원은 DB 급여 추가
+      - 출처 = '엑셀(과거)' (파랑)
+    Excel만 있는 월: '엑셀(과거)' (파랑)
+    DB만 있는 월:   'DB(크롤링)' (주황)
     """
-    sql_cnt = text("""
-        SELECT
-            LEFT(rp.register_date, 7)  AS reg_month,
-            COUNT(DISTINCT rp.id)      AS post_cnt
-        FROM  recruit_posts rp
-        JOIN  recruit_post_specialties rps ON rps.post_id = rp.id
-        WHERE rps.specialty LIKE '%마취%'
-          AND rp.register_date IS NOT NULL
-          AND rp.register_date <> ''
-        GROUP BY LEFT(rp.register_date, 7)
-        ORDER BY reg_month
-    """)
-    sql_sal = text("""
-        SELECT
-            LEFT(rp.register_date, 7)                                  AS reg_month,
-            ROUND(AVG((rp.salary_net_min + rp.salary_net_max) / 2.0))  AS avg_net
-        FROM  recruit_posts rp
-        JOIN  recruit_post_specialties rps ON rps.post_id = rp.id
-        WHERE rps.specialty LIKE '%마취%'
-          AND rp.register_date IS NOT NULL
-          AND rp.register_date <> ''
-          AND rp.salary_type  = 'net'
-          AND rp.salary_unit  = 'monthly'
-          AND rp.salary_net_min > 500
-          AND rp.salary_net_max > 500
-        GROUP BY LEFT(rp.register_date, 7)
-        ORDER BY reg_month
-    """)
     try:
         with get_engine().connect() as conn:
-            df_cnt = pd.read_sql(sql_cnt, conn)
-            df_sal = pd.read_sql(sql_sal, conn)
-        df = df_cnt.merge(df_sal, on="reg_month", how="left")
-        df = df.rename(columns={"reg_month": "등록월", "post_cnt": "공고수", "avg_net": "평균Net월급"})
-        df["출처"] = "DB(크롤링)"
-        return df
+            # 엑셀 raw: 병원 단위
+            df_xls = pd.read_sql(text("""
+                SELECT reg_month, hospital_name, net_pay
+                FROM   machwi_excel_history
+                WHERE  source = 'excel_import'
+            """), conn)
+            # DB raw: 병원 단위 (DISTINCT로 중복 진료과 제거)
+            df_db = pd.read_sql(text("""
+                SELECT DISTINCT
+                    LEFT(rp.register_date, 7) AS reg_month,
+                    rp.hospital_name,
+                    CASE WHEN rp.salary_type = 'net'
+                              AND rp.salary_unit = 'monthly'
+                              AND rp.salary_net_min > 500
+                              AND rp.salary_net_max > 500
+                         THEN (rp.salary_net_min + rp.salary_net_max) / 2.0
+                         ELSE NULL END AS net_pay
+                FROM  recruit_posts rp
+                JOIN  recruit_post_specialties rps ON rps.post_id = rp.id
+                WHERE rps.specialty LIKE '%마취%'
+                  AND rp.register_date IS NOT NULL
+                  AND rp.register_date <> ''
+            """), conn)
     except Exception as e:
-        st.error(f"마취통증 DB 조회 오류: {e}")
+        st.error(f"마취통증 통합 데이터 조회 오류: {e}")
         return pd.DataFrame()
+
+    xls_months = set(df_xls["reg_month"].unique())
+    db_months  = set(df_db["reg_month"].unique())
+    overlap    = xls_months & db_months
+    xls_only   = xls_months - db_months
+    db_only    = db_months  - xls_months
+
+    records = []
+
+    # ── 엑셀 전용 월 ──────────────────────────────────────────────────────────
+    for month in xls_only:
+        rows = df_xls[df_xls["reg_month"] == month]
+        pays = rows["net_pay"].dropna()
+        records.append({
+            "등록월": month, "공고수": len(rows),
+            "평균Net월급": round(float(pays.mean())) if len(pays) else None,
+            "출처": "엑셀(과거)",
+        })
+
+    # ── DB 전용 월 ─────────────────────────────────────────────────────────────
+    for month in db_only:
+        rows = df_db[df_db["reg_month"] == month]
+        pays = rows["net_pay"].dropna()
+        records.append({
+            "등록월": month, "공고수": len(rows),
+            "평균Net월급": round(float(pays.mean())) if len(pays) else None,
+            "출처": "DB(크롤링)",
+        })
+
+    # ── 겹치는 월: hospital_name 기준 병합, Excel 급여 우선 ────────────────────
+    for month in overlap:
+        xls_m = df_xls[df_xls["reg_month"] == month].copy()
+        db_m  = df_db[df_db["reg_month"]  == month].copy()
+
+        xls_m["h_key"] = xls_m["hospital_name"].str.strip()
+        db_m["h_key"]  = db_m["hospital_name"].str.strip()
+
+        xls_keys = set(xls_m["h_key"].dropna())
+
+        # Excel 병원 전체 급여 + DB에만 있는 병원 급여
+        db_extra = db_m[~db_m["h_key"].isin(xls_keys)]
+        all_pays = (xls_m["net_pay"].dropna().tolist()
+                    + db_extra["net_pay"].dropna().tolist())
+        total_cnt = len(xls_m) + len(db_extra)
+
+        records.append({
+            "등록월": month, "공고수": total_cnt,
+            "평균Net월급": round(sum(all_pays) / len(all_pays)) if all_pays else None,
+            "출처": "엑셀(과거)",   # 엑셀 포함이므로 파랑
+        })
+
+    df = (pd.DataFrame(records)
+          .sort_values("등록월")
+          .reset_index(drop=True))
+    return df
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -459,10 +482,69 @@ def load_hospitals(month: str, region: str, specialty: str,
 
     try:
         with get_engine().connect() as conn:
-            return pd.read_sql(sql, conn, params=params)
+            df_db = pd.read_sql(sql, conn, params=params)
     except Exception as e:
         st.error(f"병원 목록 조회 오류: {e}")
         return pd.DataFrame()
+
+    # ── 엑셀(machwi_excel_history) 데이터 병합 — 마취통증의학과 한정 ──────
+    if specialty in ("전체", "마취통증의학과"):
+        xl_params: dict = {"xl_month": month}
+        xl_region_cond = ""
+        if region != "전체":
+            sido = region[:2]
+            xl_region_cond = "AND meh.region LIKE :xl_sido || '%'"
+            xl_params["xl_sido"] = sido
+
+        xl_sql = text(f"""
+            SELECT
+                meh.hospital_name,
+                meh.region  AS region,
+                meh.net_pay,
+                (SELECT COUNT(*) FROM machwi_excel_history m2
+                 WHERE m2.hospital_name = meh.hospital_name
+                   AND m2.source = 'excel_import') AS excel_count
+            FROM machwi_excel_history meh
+            WHERE meh.reg_month = :xl_month
+              AND meh.source    = 'excel_import'
+              {xl_region_cond}
+        """)
+        try:
+            with get_engine().connect() as conn:
+                df_xl = pd.read_sql(xl_sql, conn, params=xl_params)
+        except Exception:
+            df_xl = pd.DataFrame()
+
+        if not df_xl.empty:
+            db_names = set(df_db["병원명"].str.strip()) if not df_db.empty else set()
+            new_rows = []
+            for _, xl in df_xl.iterrows():
+                h = str(xl["hospital_name"]).strip() if xl["hospital_name"] else ""
+                if not h:
+                    continue
+                ecnt = int(xl["excel_count"]) if xl["excel_count"] else 1
+                npay = float(xl["net_pay"])    if xl["net_pay"] is not None else None
+                if h in db_names:
+                    df_db.loc[df_db["병원명"].str.strip() == h, "recruit_count"] += ecnt
+                else:
+                    new_rows.append({
+                        "병원명":         h,
+                        "지역":           str(xl["region"]).strip() if xl["region"] else "-",
+                        "고용형태":       "봉직의",
+                        "진료과":         "마취통증의학과",
+                        "salary_raw":     None,
+                        "salary_net_min": npay,
+                        "salary_net_max": npay,
+                        "등록일":         month,
+                        "공고링크":       None,
+                        "recruit_count":  ecnt,
+                    })
+            if new_rows:
+                df_db = pd.concat(
+                    [df_db, pd.DataFrame(new_rows)], ignore_index=True
+                ).sort_values("병원명").reset_index(drop=True)
+
+    return df_db
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -506,10 +588,35 @@ def load_hospital_history(hospital_name: str, region_sido: str,
     """)
     try:
         with get_engine().connect() as conn:
-            return pd.read_sql(sql, conn, params=params)
+            df = pd.read_sql(sql, conn, params=params)
     except Exception as e:
         st.error(f"구인 이력 조회 오류: {e}")
         return pd.DataFrame()
+
+    # ── 엑셀 이력 추가 (machwi_excel_history) ──────────────────────────────
+    xl_sql = text("""
+        SELECT
+            reg_month               AS 등록월,
+            '마취통증의학과'         AS 진료과,
+            NULL                    AS salary_raw,
+            net_pay                 AS salary_net_min,
+            net_pay                 AS salary_net_max,
+            '[엑셀]'                AS 공고링크
+        FROM machwi_excel_history
+        WHERE hospital_name = :hospital_name
+          AND source        = 'excel_import'
+        ORDER BY reg_month
+    """)
+    try:
+        with get_engine().connect() as conn:
+            df_xl = pd.read_sql(xl_sql, conn, params={"hospital_name": hospital_name})
+    except Exception:
+        df_xl = pd.DataFrame()
+
+    if not df_xl.empty:
+        df = pd.concat([df, df_xl], ignore_index=True).sort_values("등록월").reset_index(drop=True)
+
+    return df
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -557,6 +664,8 @@ def show_hospital_dialog(month: str, region: str, specialty: str,
     def make_link(url):
         if url and str(url).startswith("http"):
             return f'<a href="{url}" target="_blank">🔗 보기</a>'
+        if url == "[엑셀]":
+            return '<span style="color:#2196F3;font-size:11px">📊 엑셀</span>'
         return "-"
 
     # ── 구인 이력 조회 (상단) ──────────────────────────────────────────────
@@ -953,116 +1062,106 @@ if selected_specialty == "마취통증의학과":
     st.caption(
         "엑셀: 2023-03 ~ 2026-01 (수동 수집 · Net 월급 기준) │ "
         "DB: 크롤링 데이터 (net/monthly 공고만 급여 집계) │ "
-        "2026-01은 양쪽 출처 모두 표시"
+        "겹치는 월: 병원명 기준 중복 제거 후 단일 막대 (엑셀 급여 우선)"
     )
 
-    df_xls = load_excel_machwi()
-    df_dbc = load_db_machwi()
+    df_combined = load_machwi_combined()
 
-    if df_xls.empty and df_dbc.empty:
+    if df_combined.empty:
         st.warning("마취통증의학과 데이터를 불러올 수 없습니다.")
     else:
         # ── KPI 카드 ───────────────────────────────────────────────────────
+        xls_rows = df_combined[df_combined["출처"] == "엑셀(과거)"]
+        dbc_rows = df_combined[df_combined["출처"] == "DB(크롤링)"]
         kc1, kc2, kc3, kc4 = st.columns(4)
-        kc1.metric("엑셀 수집 개월수", f"{len(df_xls)}개월" if not df_xls.empty else "-")
-        kc2.metric("DB 수집 개월수",   f"{len(df_dbc)}개월" if not df_dbc.empty else "-")
-        if not df_xls.empty:
-            kc3.metric(
-                "엑셀 전체 평균 Net 월급",
-                f"{int((df_xls['평균Net월급'] * df_xls['공고수']).sum() / df_xls['공고수'].sum()):,}만원",
+        kc1.metric("총 수집 개월수", f"{len(df_combined)}개월")
+        kc2.metric("엑셀 / DB 개월수", f"{len(xls_rows)} / {len(dbc_rows)}")
+        sal_rows = df_combined.dropna(subset=["평균Net월급"])
+        if not sal_rows.empty:
+            w_avg = int(
+                (sal_rows["평균Net월급"] * sal_rows["공고수"]).sum()
+                / sal_rows["공고수"].sum()
             )
+            kc3.metric("전체 가중 평균 Net 월급", f"{w_avg:,}만원")
         else:
-            kc3.metric("엑셀 전체 평균 Net 월급", "-")
-        if not df_dbc.empty and df_dbc["평균Net월급"].notna().any():
-            kc4.metric(
-                "DB 전체 평균 Net 월급",
-                f"{int(df_dbc['평균Net월급'].dropna().mean()):,}만원",
-            )
-        else:
-            kc4.metric("DB 전체 평균 Net 월급", "-")
+            kc3.metric("전체 가중 평균 Net 월급", "-")
+        kc4.metric("총 공고수", f"{df_combined['공고수'].sum():,}건")
 
         st.divider()
 
         COLOR_XLS = "#2196F3"
         COLOR_DBC = "#FF9800"
+        ANNOT_STYLE = dict(
+            xref="paper", yref="paper",
+            showarrow=False,
+            font=dict(color="red", size=12, family="Arial"),
+            align="left",
+            bgcolor="rgba(255,255,255,0.85)",
+            bordercolor="red",
+            borderwidth=1,
+            borderpad=5,
+        )
+
+        # 차트용 출처 표시: "엑셀(과거)" → "A", "DB(크롤링)" → "B"
+        df_plot = df_combined.copy()
+        df_plot["출처"] = df_plot["출처"].replace({"엑셀(과거)": "A", "DB(크롤링)": "B"})
 
         # ── 차트 1: 월별 구인 공고수 ──────────────────────────────────────
         st.markdown("#### 📊 월별 구인 공고수")
-        fig_cnt = go.Figure()
-        if not df_xls.empty:
-            fig_cnt.add_trace(go.Bar(
-                x=df_xls["등록월"],
-                y=df_xls["공고수"],
-                name="엑셀(과거)",
-                marker_color=COLOR_XLS,
-                text=df_xls["공고수"],
-                textposition="outside",
-                hovertemplate="<b>%{x}</b><br>공고수: <b>%{y}건</b> [엑셀]<extra></extra>",
-            ))
-        if not df_dbc.empty:
-            fig_cnt.add_trace(go.Bar(
-                x=df_dbc["등록월"],
-                y=df_dbc["공고수"],
-                name="DB(크롤링)",
-                marker_color=COLOR_DBC,
-                text=df_dbc["공고수"],
-                textposition="outside",
-                hovertemplate="<b>%{x}</b><br>공고수: <b>%{y}건</b> [DB]<extra></extra>",
-            ))
-        fig_cnt.update_layout(
+        fig_cnt = px.bar(
+            df_plot,
+            x="등록월", y="공고수",
+            color="출처",
+            color_discrete_map={"A": COLOR_XLS, "B": COLOR_DBC},
+            text="공고수",
             barmode="group",
+        )
+        fig_cnt.update_traces(textposition="outside")
+        fig_cnt.update_layout(
             xaxis=dict(title="등록 월", tickangle=-30, type="category",
                        categoryorder="category ascending"),
             yaxis=dict(title="공고 수", gridcolor="#eeeeee", zeroline=True),
             plot_bgcolor="white",
-            bargap=0.25, bargroupgap=0.1, height=420,
+            bargap=0.25, bargroupgap=0.1, height=450,
             margin=dict(t=20, b=60, l=50, r=20),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            legend=dict(title="출처", orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1),
             hoverlabel=dict(bgcolor="white", font_size=13),
+        )
+        fig_cnt.add_annotation(
+            x=0.01, y=0.97,
+            text="A: 인센티브 포함(+200만원)　B: 인센티브 비포함",
+            **ANNOT_STYLE,
         )
         st.plotly_chart(fig_cnt, use_container_width=True)
 
         # ── 차트 2: 월별 평균 Net 월급 ────────────────────────────────────
         st.markdown("#### 💰 월별 평균 Net 월급 추이")
-        st.caption("엑셀: 공고 기재 급여 평균 │ DB: net/monthly 공고만 집계 (협의·미기재 제외)")
+        st.caption("A: 공고 기재 급여 평균 │ B: net/monthly 공고만 집계 (협의·미기재 제외)")
+        df_sal = df_plot.dropna(subset=["평균Net월급"]).sort_values("등록월")
         fig_sal = go.Figure()
-        if not df_xls.empty:
+        for src, color, dash in [
+            ("A", COLOR_XLS, "solid"),
+            ("B", COLOR_DBC, "dash"),
+        ]:
+            d = df_sal[df_sal["출처"] == src]
+            if d.empty:
+                continue
             fig_sal.add_trace(go.Scatter(
-                x=df_xls["등록월"],
-                y=df_xls["평균Net월급"],
+                x=d["등록월"],
+                y=d["평균Net월급"],
                 mode="lines+markers+text",
-                name="엑셀(과거)",
-                line=dict(color=COLOR_XLS, width=2),
+                name=src,
+                line=dict(color=color, width=2, dash=dash),
                 marker=dict(size=7),
-                text=df_xls["평균Net월급"].apply(lambda v: f"{int(v):,}"),
+                text=d["평균Net월급"].apply(lambda v: f"{int(v):,}"),
                 textposition="top center",
-                textfont=dict(size=10, color=COLOR_XLS),
+                textfont=dict(size=10, color=color),
                 hovertemplate=(
-                    "<b>%{x}</b><br>평균 Net 월급: <b>%{y:,}만원</b> [엑셀]<extra></extra>"
+                    f"<b>%{{x}}</b><br>평균 Net 월급: <b>%{{y:,}}만원</b> [{src}]<extra></extra>"
                 ),
             ))
-        if not df_dbc.empty:
-            df_sal_dbc = df_dbc.dropna(subset=["평균Net월급"])
-            if not df_sal_dbc.empty:
-                fig_sal.add_trace(go.Scatter(
-                    x=df_sal_dbc["등록월"],
-                    y=df_sal_dbc["평균Net월급"],
-                    mode="lines+markers+text",
-                    name="DB(크롤링)",
-                    line=dict(color=COLOR_DBC, width=2, dash="dash"),
-                    marker=dict(size=9, symbol="diamond"),
-                    text=df_sal_dbc["평균Net월급"].apply(lambda v: f"{int(v):,}"),
-                    textposition="top center",
-                    textfont=dict(size=10, color=COLOR_DBC),
-                    hovertemplate=(
-                        "<b>%{x}</b><br>평균 Net 월급: <b>%{y:,}만원</b> [DB]<extra></extra>"
-                    ),
-                ))
-        all_vals = []
-        if not df_xls.empty:
-            all_vals += df_xls["평균Net월급"].tolist()
-        if not df_dbc.empty:
-            all_vals += df_dbc["평균Net월급"].dropna().tolist()
+        all_vals = df_sal["평균Net월급"].tolist()
         y_min = max(0, min(all_vals) * 0.90) if all_vals else 0
         y_max = max(all_vals) * 1.12         if all_vals else 5000
         fig_sal.update_layout(
@@ -1070,9 +1169,14 @@ if selected_specialty == "마취통증의학과":
                        categoryorder="category ascending"),
             yaxis=dict(title="평균 Net 월급 (만원)", gridcolor="#eeeeee",
                        zeroline=False, range=[y_min, y_max]),
-            plot_bgcolor="white", height=440,
+            plot_bgcolor="white", height=460,
             margin=dict(t=20, b=60, l=60, r=20),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             hoverlabel=dict(bgcolor="white", font_size=13),
+        )
+        fig_sal.add_annotation(
+            x=0.01, y=0.97,
+            text="A: 인센티브 포함(+200만원)　B: 인센티브 비포함",
+            **ANNOT_STYLE,
         )
         st.plotly_chart(fig_sal, use_container_width=True)
