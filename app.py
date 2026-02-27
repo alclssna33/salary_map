@@ -513,21 +513,24 @@ def load_hospitals(month: str, region: str, specialty: str,
 
     # ── 엑셀(machwi_excel_history) 데이터 병합 — 마취통증의학과 한정 ──────
     if specialty in ("전체", "마취통증의학과"):
-        xl_params: dict = {"xl_month": month}
+        xl_region_params: dict = {}
         xl_region_cond = ""
         if region != "전체":
             sido = region[:2]
             xl_region_cond = "AND meh.region LIKE :xl_sido || '%'"
-            xl_params["xl_sido"] = sido
+            xl_region_params["xl_sido"] = sido
 
-        xl_sql = text(f"""
-            SELECT
-                meh.hospital_name,
-                meh.region  AS region,
-                meh.net_pay,
-                (SELECT COUNT(*) FROM machwi_excel_history m2
-                 WHERE m2.hospital_name = meh.hospital_name
-                   AND m2.source = 'excel_import') AS excel_count
+        # Query 1: 전체 기간 엑셀 집계 (월 필터 없음) → DB 병원의 recruit_count 가산용
+        xl_hist_sql = text(f"""
+            SELECT hospital_name, COUNT(*) AS excel_count
+            FROM machwi_excel_history meh
+            WHERE source = 'excel_import'
+              {xl_region_cond}
+            GROUP BY hospital_name
+        """)
+        # Query 2: 클릭된 월의 엑셀 데이터 → 엑셀 전용 신규 행 추가용
+        xl_month_sql = text(f"""
+            SELECT meh.hospital_name, meh.region AS region, meh.net_pay
             FROM machwi_excel_history meh
             WHERE meh.reg_month = :xl_month
               AND meh.source    = 'excel_import'
@@ -535,38 +538,52 @@ def load_hospitals(month: str, region: str, specialty: str,
         """)
         try:
             with get_engine().connect() as conn:
-                df_xl = pd.read_sql(xl_sql, conn, params=xl_params)
+                df_xl_hist  = pd.read_sql(xl_hist_sql, conn, params=xl_region_params)
+                df_xl_month = pd.read_sql(xl_month_sql, conn,
+                                          params={"xl_month": month, **xl_region_params})
         except Exception:
-            df_xl = pd.DataFrame()
+            df_xl_hist  = pd.DataFrame()
+            df_xl_month = pd.DataFrame()
 
-        if not df_xl.empty:
-            db_names = set(df_db["병원명"].str.strip()) if not df_db.empty else set()
-            new_rows = []
-            for _, xl in df_xl.iterrows():
+        # 전체 기간 카운트 맵: hospital_name → 누적 엑셀 등장 횟수
+        xl_count_map: dict = {}
+        if not df_xl_hist.empty:
+            for _, row in df_xl_hist.iterrows():
+                h = str(row["hospital_name"]).strip() if row["hospital_name"] else ""
+                if h:
+                    xl_count_map[h] = int(row["excel_count"])
+
+        db_names = set(df_db["병원명"].str.strip()) if not df_db.empty else set()
+
+        # Step 1: DB에 있는 병원에 전체 기간 엑셀 횟수 가산
+        for h, ecnt in xl_count_map.items():
+            if h in db_names:
+                df_db.loc[df_db["병원명"].str.strip() == h, "recruit_count"] += ecnt
+
+        # Step 2: 클릭된 월에 엑셀에만 있는 병원을 신규 행으로 추가
+        new_rows = []
+        if not df_xl_month.empty:
+            for _, xl in df_xl_month.iterrows():
                 h = str(xl["hospital_name"]).strip() if xl["hospital_name"] else ""
-                if not h:
+                if not h or h in db_names:
                     continue
-                ecnt = int(xl["excel_count"]) if xl["excel_count"] else 1
-                npay = float(xl["net_pay"])    if xl["net_pay"] is not None else None
-                if h in db_names:
-                    df_db.loc[df_db["병원명"].str.strip() == h, "recruit_count"] += ecnt
-                else:
-                    new_rows.append({
-                        "병원명":         h,
-                        "지역":           str(xl["region"]).strip() if xl["region"] else "-",
-                        "고용형태":       "봉직의",
-                        "진료과":         "마취통증의학과",
-                        "salary_raw":     None,
-                        "salary_net_min": npay,
-                        "salary_net_max": npay,
-                        "등록일":         month,
-                        "공고링크":       None,
-                        "recruit_count":  ecnt,
-                    })
-            if new_rows:
-                df_db = pd.concat(
-                    [df_db, pd.DataFrame(new_rows)], ignore_index=True
-                ).sort_values("병원명").reset_index(drop=True)
+                npay = float(xl["net_pay"]) if xl["net_pay"] is not None else None
+                new_rows.append({
+                    "병원명":         h,
+                    "지역":           str(xl["region"]).strip() if xl["region"] else "-",
+                    "고용형태":       "봉직의",
+                    "진료과":         "마취통증의학과",
+                    "salary_raw":     None,
+                    "salary_net_min": npay,
+                    "salary_net_max": npay,
+                    "등록일":         month,
+                    "공고링크":       None,
+                    "recruit_count":  xl_count_map.get(h, 1),
+                })
+        if new_rows:
+            df_db = pd.concat(
+                [df_db, pd.DataFrame(new_rows)], ignore_index=True
+            ).sort_values("병원명").reset_index(drop=True)
 
     return df_db
 
@@ -723,18 +740,77 @@ def show_hospital_dialog(month: str, region: str, specialty: str,
                 st.caption(
                     f"**{h_name}** ({h_region} / {h_emp})  —  총 {len(df_hist)}건"
                 )
-                df_hist.insert(
-                    2, "Net월급(퇴직금포함)",
-                    df_hist.apply(format_salary, axis=1),
+
+                # ── 차트 데이터 준비 (포맷 전 원본 사용) ───────────────────
+                df_chart = df_hist.copy()
+                df_chart["출처"] = df_chart["공고링크"].apply(
+                    lambda u: "A (엑셀)" if u == "[엑셀]" else "B (DB)"
                 )
-                df_hist["공고링크"] = df_hist["공고링크"].apply(make_link)
-                df_hist = df_hist.drop(
-                    columns=["salary_raw", "salary_net_min", "salary_net_max"]
+                df_chart["net_pay"] = df_chart.apply(
+                    lambda r: (
+                        (float(r["salary_net_min"]) + float(r["salary_net_max"])) / 2
+                        if pd.notna(r.get("salary_net_min")) and pd.notna(r.get("salary_net_max"))
+                        else None
+                    ), axis=1,
                 )
-                st.markdown(
-                    df_hist.to_html(escape=False, index=False),
-                    unsafe_allow_html=True,
-                )
+                df_chart = df_chart[df_chart["net_pay"].notna()].sort_values("등록월")
+
+                # ── 테이블 + 차트 나란히 ──────────────────────────────────
+                col_tbl, col_chart = st.columns([1, 1])
+
+                with col_tbl:
+                    df_disp = df_hist.copy()
+                    df_disp.insert(2, "Net월급(퇴직금포함)", df_disp.apply(format_salary, axis=1))
+                    df_disp["공고링크"] = df_disp["공고링크"].apply(make_link)
+                    df_disp = df_disp.drop(
+                        columns=["salary_raw", "salary_net_min", "salary_net_max"]
+                    )
+                    st.markdown(
+                        df_disp.to_html(escape=False, index=False),
+                        unsafe_allow_html=True,
+                    )
+
+                with col_chart:
+                    if not df_chart.empty:
+                        fig_h = go.Figure()
+                        color_map = {"A (엑셀)": "#1976D2", "B (DB)": "#F57C00"}
+                        for src in ["A (엑셀)", "B (DB)"]:
+                            d = df_chart[df_chart["출처"] == src]
+                            if d.empty:
+                                continue
+                            fig_h.add_trace(go.Scatter(
+                                x=d["등록월"],
+                                y=d["net_pay"],
+                                mode="lines+markers",
+                                name=src,
+                                line=dict(color=color_map[src], width=2),
+                                marker=dict(size=8),
+                                hovertemplate="%{x}<br><b>%{y:,.0f}만원</b><extra></extra>",
+                            ))
+                        # A-B 구간 연결선 (점선)
+                        d_a = df_chart[df_chart["출처"] == "A (엑셀)"].sort_values("등록월")
+                        d_b = df_chart[df_chart["출처"] == "B (DB)"].sort_values("등록월")
+                        if not d_a.empty and not d_b.empty:
+                            fig_h.add_trace(go.Scatter(
+                                x=[d_a.iloc[-1]["등록월"], d_b.iloc[0]["등록월"]],
+                                y=[d_a.iloc[-1]["net_pay"], d_b.iloc[0]["net_pay"]],
+                                mode="lines",
+                                line=dict(color="#aaa", width=1.5, dash="dot"),
+                                showlegend=False,
+                                hoverinfo="skip",
+                            ))
+                        fig_h.update_layout(
+                            title=dict(text="📈 Net월급 시계열 추이", font=dict(size=13)),
+                            xaxis=dict(title=None, tickangle=-45, tickfont=dict(size=10)),
+                            yaxis=dict(title="만원", tickformat=","),
+                            legend=dict(orientation="h", y=1.12, x=0),
+                            margin=dict(l=40, r=10, t=55, b=60),
+                            height=340,
+                            plot_bgcolor="#fafafa",
+                        )
+                        st.plotly_chart(fig_h, use_container_width=True)
+                    else:
+                        st.info("급여 데이터가 없어 차트를 그릴 수 없습니다.")
         st.divider()
 
     # ── 병원 목록 표 ───────────────────────────────────────────────────────
