@@ -504,6 +504,11 @@ def load_national_trend(specialty: str, employment_type: str) -> pd.DataFrame:
                 .sort_values("reg_month")
             )
 
+    # ── 표준 시도(17개) 외 이상값 제거 (크롤링 오류로 시군구명이 저장된 경우) ──
+    _VALID_SIDOS = {"서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종",
+                    "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주"}
+    df_db = df_db[df_db["region_sido"].isin(_VALID_SIDOS)]
+
     df_db["cnt"]     = df_db["cnt"].astype(int)
     df_db["avg_pay"] = pd.to_numeric(df_db["avg_pay"], errors="coerce")
     return df_db
@@ -859,9 +864,8 @@ def show_hospital_dialog(month: str, region: str, specialty: str,
                 with col_tbl:
                     df_disp = df_hist.copy()
                     df_disp.insert(2, "Net월급(퇴직금포함)", df_disp.apply(format_salary, axis=1))
-                    df_disp["공고링크"] = df_disp["공고링크"].apply(make_link)
                     df_disp = df_disp.drop(
-                        columns=["salary_raw", "salary_net_min", "salary_net_max"]
+                        columns=["salary_raw", "salary_net_min", "salary_net_max", "공고링크"]
                     )
                     st.markdown(
                         df_disp.to_html(escape=False, index=False),
@@ -916,14 +920,27 @@ def show_hospital_dialog(month: str, region: str, specialty: str,
     display = df_h.copy()
     display.insert(4, "Net월급(퇴직금포함)", display.apply(format_salary, axis=1))
     display.insert(6, "중복횟수", display["recruit_count"].apply(format_count))
-    display["공고링크"] = display["공고링크"].apply(make_link)
     display = display.drop(
-        columns=["salary_raw", "salary_net_min", "salary_net_max", "recruit_count"]
+        columns=["salary_raw", "salary_net_min", "salary_net_max", "recruit_count", "공고링크"]
     )
-    st.markdown(
-        display.to_html(escape=False, index=False),
-        unsafe_allow_html=True,
+    _html = display.to_html(escape=False, index=False)
+    # 진료과 ellipsis: th + td 모두 적용을 위해 style 블록 주입
+    _html = _html.replace("<table ", '<table class="hosp-list-tbl" ')
+    _style = (
+        "<style>"
+        ".hosp-list-tbl td:nth-child(4), .hosp-list-tbl th:nth-child(4) {"
+        "  width:90px; max-width:90px;"
+        "  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+        "}"
+        "</style>"
     )
+    for _col, _css in {
+        "고용형태": "width:85px",
+        "중복횟수": "width:62px",
+        "등록일":   "width:74px",
+    }.items():
+        _html = _html.replace(f"<th>{_col}</th>", f'<th style="{_css}">{_col}</th>')
+    st.markdown(_style + _html, unsafe_allow_html=True)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -995,6 +1012,119 @@ if selected_specialty != "전체":
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Tab2 지도 클릭 팝업 — 시도 버블 클릭 시 해당 병원 리스트
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+@st.dialog("🏥 지역 구인 병원 리스트", width="large")
+def show_map_region_dialog(sido: str, specialty: str, emp_type: str, months: list):
+    spec_lbl = specialty if specialty != "전체" else "전체 진료과"
+    emp_lbl  = emp_type  if emp_type  != "전체" else "전체 고용형태"
+    st.markdown(
+        f"**{sido}** · {spec_lbl} · {emp_lbl} · 기준월: **{' · '.join(months)}**",
+        help="지도 버블 클릭 기준 — 최신 2개월 데이터",
+    )
+    st.divider()
+
+    # ── DB 쿼리 ──────────────────────────────────────────────────────────────
+    db_params: dict = {"_sido": sido}
+    db_conds = ["rp.region_sido = :_sido"]
+    for i, m in enumerate(months):
+        db_params[f"_m{i}"] = m
+    month_clause = " OR ".join(
+        f"LEFT(rp.register_date, 7) = :_m{i}" for i in range(len(months))
+    )
+    db_conds.append(f"({month_clause})")
+
+    if specialty != "전체":
+        db_conds.append("rps.specialty = :_spec")
+        db_params["_spec"] = specialty
+        spec_join = "JOIN recruit_post_specialties rps ON rps.post_id = rp.id"
+    else:
+        spec_join = """LEFT JOIN (
+                           SELECT post_id,
+                                  STRING_AGG(specialty, '·' ORDER BY specialty) AS specialty
+                           FROM   recruit_post_specialties
+                           GROUP  BY post_id
+                       ) rps ON rps.post_id = rp.id"""
+    if emp_type != "전체":
+        db_conds.append("rp.employment_type = :_emp")
+        db_params["_emp"] = emp_type
+
+    try:
+        with get_engine().connect() as conn:
+            df_mh = pd.read_sql(text(f"""
+                SELECT
+                    rp.hospital_name          AS 병원명,
+                    rp.region                 AS 지역,
+                    rp.employment_type        AS 고용형태,
+                    rps.specialty             AS 진료과,
+                    rp.salary_net_min,
+                    rp.salary_net_max,
+                    rp.salary_raw,
+                    LEFT(rp.register_date, 7) AS 등록월,
+                    rp.url                    AS 공고링크
+                FROM recruit_posts rp
+                {spec_join}
+                WHERE {' AND '.join(db_conds)}
+                ORDER BY rp.register_date DESC, rp.hospital_name
+            """), conn, params=db_params)
+    except Exception as e:
+        st.error(f"조회 오류: {e}")
+        return
+
+    # ── 마취과: Excel 데이터 추가 ─────────────────────────────────────────────
+    if specialty == "마취통증의학과":
+        xl_params: dict = {"_xl_sido": f"{sido}%"}
+        for i, m in enumerate(months):
+            xl_params[f"_xm{i}"] = m
+        xl_month_clause = " OR ".join(
+            f"meh.reg_month = :_xm{i}" for i in range(len(months))
+        )
+        try:
+            with get_engine().connect() as conn:
+                df_xl_mh = pd.read_sql(text(f"""
+                    SELECT
+                        meh.hospital_name  AS 병원명,
+                        meh.region         AS 지역,
+                        '봉직의'           AS 고용형태,
+                        '마취통증의학과'   AS 진료과,
+                        meh.net_pay        AS salary_net_min,
+                        meh.net_pay        AS salary_net_max,
+                        NULL               AS salary_raw,
+                        meh.reg_month      AS 등록월,
+                        '[엑셀]'           AS 공고링크
+                    FROM machwi_excel_history meh
+                    WHERE meh.source = 'excel_import'
+                      AND meh.region LIKE :_xl_sido
+                      AND ({xl_month_clause})
+                """), conn, params=xl_params)
+        except Exception:
+            df_xl_mh = pd.DataFrame()
+
+        if not df_xl_mh.empty:
+            df_mh = pd.concat([df_mh, df_xl_mh], ignore_index=True)
+            df_mh = df_mh.sort_values(["등록월", "병원명"], ascending=[False, True])
+
+    if df_mh.empty:
+        st.info("해당 기간 내 공고 데이터가 없습니다.")
+        return
+
+    # ── 포맷 ─────────────────────────────────────────────────────────────────
+    def _fmt_pay(row):
+        mn, mx = row.get("salary_net_min"), row.get("salary_net_max")
+        if pd.notna(mn) and pd.notna(mx) and float(mn) > 0:
+            mn_i, mx_i = int(mn), int(mx)
+            return f"{mn_i:,}" if mn_i == mx_i else f"{mn_i:,}~{mx_i:,}"
+        raw = row.get("salary_raw")
+        return str(raw) if pd.notna(raw) and raw else "-"
+
+    df_mh.insert(4, "Net월급(만원)", df_mh.apply(_fmt_pay, axis=1))
+    df_mh = df_mh.drop(columns=["salary_raw", "salary_net_min", "salary_net_max", "공고링크"])
+
+    st.caption(f"총 **{len(df_mh)}건**")
+    st.markdown(df_mh.to_html(escape=False, index=False), unsafe_allow_html=True)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 메인 화면
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 st.title("🏥 구인 트렌드 대시보드")
@@ -1022,7 +1152,7 @@ with tab1:
         selected_employment = st.selectbox(
             "👔 고용형태",
             EMPLOYMENT_TYPES,
-            index=0,
+            index=EMPLOYMENT_TYPES.index("봉직의"),
             key="employment_filter",
         )
 
@@ -1489,6 +1619,97 @@ with tab2:
                 .reset_index()
             )
 
+            # ── 마취통증의학과 선택 시 Excel 데이터도 시군구별 건수 합산 ─────
+            if selected_specialty == "마취통증의학과":
+                try:
+                    with get_engine().connect() as conn:
+                        df_xl_sg = pd.read_sql(text("""
+                            SELECT meh.region    AS region,
+                                   meh.reg_month AS reg_month,
+                                   COUNT(*)      AS post_count
+                            FROM   machwi_excel_history meh
+                            WHERE  meh.source = 'excel_import'
+                              AND  meh.region LIKE :sido_like
+                              AND  LENGTH(meh.region) > 2
+                            GROUP  BY meh.region, meh.reg_month
+                        """), conn, params={"sido_like": f"{selected_sido}%"})
+                except Exception:
+                    df_xl_sg = pd.DataFrame()
+
+                if not df_xl_sg.empty:
+                    df_xl_sg["post_count"] = df_xl_sg["post_count"].astype(int)
+                    df_sg = pd.concat([df_sg, df_xl_sg], ignore_index=True)
+                    df_sg = (
+                        df_sg.groupby(["region", "reg_month"])["post_count"]
+                        .sum().reset_index()
+                    )
+
+            # ── 시군구별 급여 집계 (DB) ──────────────────────────────────────
+            _sg_conds = [
+                "rp.region_sido = :_sido",
+                "rp.salary_net_min > 1300",
+                "rp.salary_net_max > 1300",
+                "SPLIT_PART(rp.region, ' ', 2) ~ '(시|군)$'",
+            ]
+            _sg_params: dict = {"_sido": selected_sido}
+            _sg_join = ""
+            if selected_specialty != "전체":
+                _sg_conds.append("rps.specialty = :_spec")
+                _sg_params["_spec"] = selected_specialty
+                _sg_join = "JOIN recruit_post_specialties rps ON rps.post_id = rp.id"
+            if selected_emp_t2 != "전체":
+                _sg_conds.append("rp.employment_type = :_emp")
+                _sg_params["_emp"] = selected_emp_t2
+            try:
+                with get_engine().connect() as conn:
+                    df_sg_pay = pd.read_sql(text(f"""
+                        SELECT
+                            (rp.region_sido || REGEXP_REPLACE(
+                                SPLIT_PART(rp.region, ' ', 2), '(시|군)$', ''
+                            )) AS region,
+                            LEFT(rp.register_date, 7) AS reg_month,
+                            ROUND(AVG((rp.salary_net_min + rp.salary_net_max) / 2.0)) AS avg_pay
+                        FROM recruit_posts rp
+                        {_sg_join}
+                        WHERE {' AND '.join(_sg_conds)}
+                        GROUP BY (rp.region_sido || REGEXP_REPLACE(
+                                     SPLIT_PART(rp.region, ' ', 2), '(시|군)$', ''
+                                 )),
+                                 LEFT(rp.register_date, 7)
+                    """), conn, params=_sg_params)
+                    df_sg_pay["avg_pay"] = pd.to_numeric(df_sg_pay["avg_pay"], errors="coerce")
+            except Exception:
+                df_sg_pay = pd.DataFrame()
+
+            # 마취과: Excel 급여도 시군구별 합산 (단순 평균)
+            if selected_specialty == "마취통증의학과":
+                try:
+                    with get_engine().connect() as conn:
+                        df_xl_sg_pay = pd.read_sql(text("""
+                            SELECT meh.region    AS region,
+                                   meh.reg_month AS reg_month,
+                                   ROUND(AVG(meh.net_pay)) AS avg_pay
+                            FROM   machwi_excel_history meh
+                            WHERE  meh.source = 'excel_import'
+                              AND  meh.region LIKE :sido_like
+                              AND  LENGTH(meh.region) > 2
+                            GROUP  BY meh.region, meh.reg_month
+                        """), conn, params={"sido_like": f"{selected_sido}%"})
+                        df_xl_sg_pay["avg_pay"] = pd.to_numeric(
+                            df_xl_sg_pay["avg_pay"], errors="coerce")
+                except Exception:
+                    df_xl_sg_pay = pd.DataFrame()
+
+                if not df_xl_sg_pay.empty:
+                    if df_sg_pay.empty:
+                        df_sg_pay = df_xl_sg_pay
+                    else:
+                        combined_pay = pd.concat([df_sg_pay, df_xl_sg_pay], ignore_index=True)
+                        df_sg_pay = (
+                            combined_pay.groupby(["region", "reg_month"])["avg_pay"]
+                            .mean().round().reset_index()
+                        )
+
             if df_sg.empty:
                 st.info(f"**{selected_sido}** 내 시군구 단위 데이터가 없습니다.")
             else:
@@ -1502,17 +1723,32 @@ with tab2:
                             fig_sg = go.Figure()
                             fig_sg.add_trace(go.Bar(
                                 x=d["reg_month"], y=d["post_count"],
-                                marker_color="#A5D6A7",
+                                marker_color="#A5D6A7", yaxis="y",
                                 hovertemplate="%{x}<br>건수: <b>%{y}건</b><extra></extra>",
                             ))
+                            if not df_sg_pay.empty:
+                                d_pay = (df_sg_pay[df_sg_pay["region"] == sg]
+                                         .dropna(subset=["avg_pay"])
+                                         .sort_values("reg_month"))
+                                if not d_pay.empty:
+                                    fig_sg.add_trace(go.Scatter(
+                                        x=d_pay["reg_month"], y=d_pay["avg_pay"],
+                                        mode="lines+markers",
+                                        marker=dict(size=4),
+                                        line=dict(color="#E53935", width=1.5),
+                                        yaxis="y2",
+                                        hovertemplate="%{x}<br>페이: <b>%{y:,}만원</b><extra></extra>",
+                                    ))
                             fig_sg.update_layout(
                                 title=dict(text=sg, font=dict(size=11, color="#333"), x=0.5),
                                 xaxis=dict(tickangle=-60, tickfont=dict(size=7),
                                            type="category", nticks=6, showgrid=False),
                                 yaxis=dict(showgrid=True, gridcolor="#eeeeee",
                                            tickfont=dict(size=8), title=""),
-                                showlegend=False, height=180,
-                                margin=dict(t=26, b=38, l=25, r=10),
+                                yaxis2=dict(overlaying="y", side="right",
+                                            tickfont=dict(size=8), title="", showgrid=False),
+                                showlegend=False, height=200,
+                                margin=dict(t=26, b=38, l=25, r=30),
                                 plot_bgcolor="#fafafa",
                             )
                             st.plotly_chart(fig_sg, width="stretch")
@@ -1563,12 +1799,27 @@ with tab2:
                 cnt_max = df_recent["cnt"].max()
                 if cnt_max > cnt_min:
                     df_recent["bubble_size"] = (
-                        10 + (df_recent["cnt"] - cnt_min) / (cnt_max - cnt_min) * 40
+                        18 + (df_recent["cnt"] - cnt_min) / (cnt_max - cnt_min) * 60
                     )
                 else:
-                    df_recent["bubble_size"] = 25
+                    df_recent["bubble_size"] = 38
 
+                # 검은 테두리용 레이어 (본 버블보다 4px 크게, 검정)
                 fig_map = go.Figure(go.Scattermapbox(
+                    lat=df_recent["lat"],
+                    lon=df_recent["lon"],
+                    mode="markers",
+                    marker=dict(
+                        size=df_recent["bubble_size"] + 4,
+                        color="black",
+                        sizemode="diameter",
+                        opacity=1.0,
+                    ),
+                    hoverinfo="skip",
+                    showlegend=False,
+                ))
+                # 컬러 버블 레이어 (전면)
+                fig_map.add_trace(go.Scattermapbox(
                     lat=df_recent["lat"],
                     lon=df_recent["lon"],
                     mode="markers+text",
@@ -1579,7 +1830,7 @@ with tab2:
                         showscale=True,
                         colorbar=dict(title="평균페이<br>(만원)", thickness=12, len=0.6),
                         sizemode="diameter",
-                        opacity=0.8,
+                        opacity=0.85,
                     ),
                     text=df_recent["region_sido"],
                     textposition="top center",
@@ -1600,4 +1851,16 @@ with tab2:
                     height=540,
                     margin=dict(t=10, b=0, l=0, r=0),
                 )
-                st.plotly_chart(fig_map, width="stretch")
+                map_event = st.plotly_chart(
+                    fig_map,
+                    width="stretch",
+                    config={"scrollZoom": True},
+                    on_select="rerun",
+                    key="map_chart_t2",
+                )
+                if map_event.selection.points:
+                    pt = map_event.selection.points[0]
+                    clicked_sido = df_recent.iloc[pt["point_index"]]["region_sido"]
+                    show_map_region_dialog(
+                        clicked_sido, selected_specialty, selected_emp_t2, recent_months
+                    )
