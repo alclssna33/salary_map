@@ -99,6 +99,7 @@ def load_machwi_combined(region: str = "전체") -> pd.DataFrame:
                 FROM  recruit_posts rp
                 JOIN  recruit_post_specialties rps ON rps.post_id = rp.id
                 WHERE rps.specialty LIKE '%마취%'
+                  AND rp.employment_type = '봉직의'
                   AND rp.register_date IS NOT NULL
                   AND rp.register_date <> ''
                   {db_region_cond}
@@ -369,11 +370,11 @@ def load_aggregated() -> pd.DataFrame:
         with get_engine().connect() as conn:
             return pd.read_sql(text("""
                 SELECT
-                    rp.region_sido            AS region,
-                    rps.specialty             AS specialty,
-                    rp.employment_type        AS employment_type,
-                    LEFT(rp.register_date, 7) AS reg_month,
-                    COUNT(DISTINCT rp.id)     AS post_count
+                    rp.region_sido                  AS region,
+                    rps.specialty                   AS specialty,
+                    rp.employment_type              AS employment_type,
+                    LEFT(rp.register_date, 7)       AS reg_month,
+                    COUNT(DISTINCT rp.hospital_name) AS post_count
                 FROM  recruit_posts             rp
                 JOIN  recruit_post_specialties  rps ON rps.post_id = rp.id
                 WHERE rp.register_date IS NOT NULL
@@ -386,11 +387,11 @@ def load_aggregated() -> pd.DataFrame:
                 SELECT
                     (rp.region_sido || REGEXP_REPLACE(
                         SPLIT_PART(rp.region, ' ', 2), '(시|군)$', ''
-                    ))                        AS region,
-                    rps.specialty             AS specialty,
-                    rp.employment_type        AS employment_type,
-                    LEFT(rp.register_date, 7) AS reg_month,
-                    COUNT(DISTINCT rp.id)     AS post_count
+                    ))                               AS region,
+                    rps.specialty                    AS specialty,
+                    rp.employment_type               AS employment_type,
+                    LEFT(rp.register_date, 7)        AS reg_month,
+                    COUNT(DISTINCT rp.hospital_name) AS post_count
                 FROM  recruit_posts             rp
                 JOIN  recruit_post_specialties  rps ON rps.post_id = rp.id
                 WHERE rp.register_date IS NOT NULL
