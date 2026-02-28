@@ -1006,8 +1006,11 @@ with st.sidebar:
 # 필터링 & 월별 집계  (employment_type 필터는 차트 섹션에서 선택 후 적용)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 df = df_all.copy()
-if selected_region    != "전체":
-    df = df[df["region"]    == selected_region]
+if selected_region != "전체":
+    df = df[df["region"] == selected_region]
+else:
+    # 전체 지역일 때는 시도 단위 행만 사용 (시군 행과의 중복 카운팅 방지)
+    df = df[df["region"].str.len() == 2]
 if selected_specialty != "전체":
     df = df[df["specialty"] == selected_specialty]
 
