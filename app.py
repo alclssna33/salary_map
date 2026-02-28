@@ -1582,6 +1582,8 @@ with tab2:
                             hovertemplate="%{x}<br>건수: <b>%{y}건</b><extra></extra>",
                         ))
                         d_pay = d.dropna(subset=["avg_pay"])
+                        pay_max = (d_pay["avg_pay"].max() * 1.1
+                                   if not d_pay.empty else 3000)
                         if not d_pay.empty:
                             fig_m.add_trace(go.Scatter(
                                 x=d_pay["reg_month"], y=d_pay["avg_pay"],
@@ -1599,7 +1601,7 @@ with tab2:
                                        tickfont=dict(size=8), title=""),
                             yaxis2=dict(overlaying="y", side="right",
                                         tickfont=dict(size=8), title="", showgrid=False,
-                                        range=[1300, None]),
+                                        range=[1300, pay_max]),
                             showlegend=False, height=200,
                             margin=dict(t=28, b=40, l=30, r=30),
                             plot_bgcolor="#fafafa",
@@ -1735,11 +1737,13 @@ with tab2:
                                 marker_color="#A5D6A7", yaxis="y",
                                 hovertemplate="%{x}<br>건수: <b>%{y}건</b><extra></extra>",
                             ))
+                            sg_pay_max = 3000
                             if not df_sg_pay.empty:
                                 d_pay = (df_sg_pay[df_sg_pay["region"] == sg]
                                          .dropna(subset=["avg_pay"])
                                          .sort_values("reg_month"))
                                 if not d_pay.empty:
+                                    sg_pay_max = d_pay["avg_pay"].max() * 1.1
                                     fig_sg.add_trace(go.Scatter(
                                         x=d_pay["reg_month"], y=d_pay["avg_pay"],
                                         mode="lines+markers",
@@ -1756,7 +1760,7 @@ with tab2:
                                            tickfont=dict(size=8), title=""),
                                 yaxis2=dict(overlaying="y", side="right",
                                             tickfont=dict(size=8), title="", showgrid=False,
-                                            range=[1300, None]),
+                                            range=[1300, sg_pay_max]),
                                 showlegend=False, height=200,
                                 margin=dict(t=26, b=38, l=25, r=30),
                                 plot_bgcolor="#fafafa",
