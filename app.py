@@ -67,9 +67,9 @@ def load_machwi_combined(region: str = "전체") -> pd.DataFrame:
             db_region_cond = "AND rp.region_sido = :sido AND rp.region LIKE :region_like"
             db_params["sido"]        = sido
             db_params["region_like"] = f"{sido} {city}%"
-            # Excel region 형식 불일치 가능성 → 시도 단위로 필터
-            xl_region_cond  = "AND meh.region LIKE :xl_sido || '%'"
-            xl_params["xl_sido"] = sido
+            # Excel region 형식: "경기화성", "경기수원" 등 시도+시군 형태로 저장
+            xl_region_cond  = "AND meh.region LIKE :xl_region || '%'"
+            xl_params["xl_region"] = region  # 예: "경기화성"
         else:                         # 시도 단위 (예: 서울, 경기)
             db_region_cond  = "AND rp.region_sido = :sido"
             db_params["sido"] = region
