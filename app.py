@@ -1217,14 +1217,18 @@ with tab1:
             on_select="rerun", selection_mode="points", key="bar_chart",
         )
         points = event.selection.get("points", []) if event.selection else []
-        if points and not st.session_state.get("_dialog_opened", False):
-            clicked_month = str(points[0].get("x", ""))
-            if clicked_month:
-                st.session_state["_dialog_opened"] = True
-                show_hospital_dialog(
-                    clicked_month, selected_region,
-                    selected_specialty, selected_employment,
-                )
+        current_bar_sel = str(points[0].get("x", "")) if points else ""
+        if not current_bar_sel:
+            st.session_state["_prev_bar_sel"] = ""
+        if (current_bar_sel
+                and current_bar_sel != st.session_state.get("_prev_bar_sel", "")
+                and not st.session_state.get("_dialog_opened", False)):
+            st.session_state["_prev_bar_sel"] = current_bar_sel
+            st.session_state["_dialog_opened"] = True
+            show_hospital_dialog(
+                current_bar_sel, selected_region,
+                selected_specialty, selected_employment,
+            )
 
     # ── 상세 데이터 테이블 ─────────────────────────────────────────────────
     with st.expander("📋 상세 데이터 테이블 보기"):
@@ -1872,9 +1876,16 @@ with tab2:
                     on_select="rerun",
                     key="map_chart_t2",
                 )
-                if map_event.selection.points and not st.session_state.get("_dialog_opened", False):
+                current_map_sel = (str(map_event.selection.points[0]["point_index"])
+                                   if map_event.selection.points else "")
+                if not current_map_sel:
+                    st.session_state["_prev_map_sel"] = ""
+                if (current_map_sel
+                        and current_map_sel != st.session_state.get("_prev_map_sel", "")
+                        and not st.session_state.get("_dialog_opened", False)):
                     pt = map_event.selection.points[0]
                     clicked_sido = df_recent.iloc[pt["point_index"]]["region_sido"]
+                    st.session_state["_prev_map_sel"] = current_map_sel
                     st.session_state["_dialog_opened"] = True
                     show_map_region_dialog(
                         clicked_sido, selected_specialty, selected_emp_t2, recent_months
