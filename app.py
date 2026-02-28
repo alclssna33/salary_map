@@ -1132,6 +1132,9 @@ st.caption(f"필터 적용 중 → 지역: **{selected_region}** · 진료과: *
 
 tab1, tab2 = st.tabs(["📋 지역 상세 분석", "🗺️ 전국 지도 & 흐름 보기"])
 
+# 한 번의 rerun에서 다이얼로그가 두 번 열리는 것을 방지
+st.session_state["_dialog_opened"] = False
+
 EMPLOYMENT_TYPES = [
     "전체", "봉직의", "대진의", "당직의", "전임의", "전공의",
     "입원전담전문의", "출장검진", "임상(사내의사)", "임상외", "동업", "기타",
@@ -1210,9 +1213,10 @@ with tab1:
             on_select="rerun", selection_mode="points", key="bar_chart",
         )
         points = event.selection.get("points", []) if event.selection else []
-        if points:
+        if points and not st.session_state.get("_dialog_opened", False):
             clicked_month = str(points[0].get("x", ""))
             if clicked_month:
+                st.session_state["_dialog_opened"] = True
                 show_hospital_dialog(
                     clicked_month, selected_region,
                     selected_specialty, selected_employment,
@@ -1858,9 +1862,10 @@ with tab2:
                     on_select="rerun",
                     key="map_chart_t2",
                 )
-                if map_event.selection.points:
+                if map_event.selection.points and not st.session_state.get("_dialog_opened", False):
                     pt = map_event.selection.points[0]
                     clicked_sido = df_recent.iloc[pt["point_index"]]["region_sido"]
+                    st.session_state["_dialog_opened"] = True
                     show_map_region_dialog(
                         clicked_sido, selected_specialty, selected_emp_t2, recent_months
                     )
