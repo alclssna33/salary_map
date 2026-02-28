@@ -418,6 +418,17 @@ pip install matplotlib
 | | — 이력 테이블 우측에 Plotly 라인차트 나란히 표시 (st.columns 1:1 분할) |
 | | — A(엑셀, 파랑) / B(DB, 주황) 출처별 색상 구분, A-B 회색 점선 연결 |
 | | — X축: 등록월, Y축: Net월급(만원) / 호버 시 월·금액 툴팁 |
+| 2026-02-28 (3) | **인프라** — DB Supabase 이관 + Streamlit Community Cloud 배포 |
+| | — 로컬 PostgreSQL → Supabase 이관 완료 (psql pooler 방식) |
+| | — `app.py` DB_URL → `st.secrets["DB_URL"]`로 교체 (보안) |
+| | — `phase4_crawler.py` DB_CONFIG Supabase 주소로 교체 |
+| | — `requirements.txt` · `.gitignore` · `.streamlit/secrets.toml` 추가 |
+| | — GitHub 저장소 생성 (`alclssna33/salary_map`) → main 브랜치 push |
+| | — Streamlit Community Cloud 배포 완료 |
+| | **버그수정** — Tab1·Tab2 다이얼로그 중복 오픈 오류 수정 |
+| | — Tab1 막대 클릭 + Tab2 지도 클릭이 동시에 살아있을 때 `@st.dialog` 충돌 발생 |
+| | — `_dialog_opened` 세션 플래그로 rerun당 하나의 다이얼로그만 열리도록 처리 |
+| | — 크롤러 신규 수집: 379건 추가 (2026-02-24 ~ 2026-02-28) |
 
 ---
 
@@ -439,45 +450,37 @@ pip install matplotlib
 
 ---
 
-## ☁️ Supabase 이관 계획
+## ☁️ Supabase + Streamlit Cloud 배포 현황 ✅ 완료 (2026-02-28)
 
-로컬 PostgreSQL → Supabase(온라인 PostgreSQL)로 전환 시 아래 순서대로 진행.
+### 현재 운영 구조
 
-### 1단계 — DB 이관 (표준 PostgreSQL 덤프)
-
-```bash
-# 로컬 → SQL 덤프
-pg_dump -U postgres -d medigate -f medigate_dump.sql
-
-# Supabase SQL 에디터 or psql로 복원
-psql -h [프로젝트].supabase.co -U postgres -d postgres -f medigate_dump.sql
+```
+phase4_crawler.py (로컬 PC 실행)
+        ↓ 직접 저장
+    Supabase (온라인 PostgreSQL)
+        ↓ 조회
+    app.py → Streamlit Community Cloud (온라인 대시보드)
 ```
 
-### 2단계 — app.py DB_URL 교체 (한 줄만 수정)
+### 연결 방식 (Pooler, sslmode=require)
 
-```python
-# 변경 전
-DB_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/medigate"
+- `app.py`: `DB_URL = st.secrets["DB_URL"]` — Streamlit Cloud secrets에 등록
+- `phase4_crawler.py`: `DB_CONFIG` dict에 Supabase pooler 주소 직접 입력
+- 로컬 `streamlit run app.py`: `.streamlit/secrets.toml` (gitignore 처리)
 
-# 변경 후
-DB_URL = "postgresql+psycopg2://postgres:[비밀번호]@[프로젝트].supabase.co:5432/postgres?sslmode=require"
-```
+### GitHub 저장소
 
-> Supabase는 SSL 필수 → `?sslmode=require` 반드시 추가
+- URL: `https://github.com/alclssna33/salary_map`
+- Branch: `main`
+- 배포 파일: `app.py` / `requirements.txt`
 
-### 3단계 — 엑셀 과거 데이터 이관 ✅ 이미 완료 (2026-02-27)
-
-**현재 상황:**
-- `machwi_excel_history` 테이블이 로컬 PostgreSQL에 존재 (**4,220건 / 35개월**, source=`excel_import`)
-- `app.py`의 `load_excel_machwi()`가 이미 DB 쿼리 방식으로 동작 중
-- **`pg_dump` 시 자동 포함** → Supabase 이관 시 별도 작업 불필요
-
-### 이관 체크리스트
+### 이관 체크리스트 ✅ 전부 완료
 
 - [x] `pg_dump`로 기존 DB 백업 (`machwi_excel_history` 자동 포함) → `medigate_dump.sql`
-- [x] Supabase 프로젝트 생성 및 복원 (2026-02-28)
-- [x] `app.py` DB_URL + `?sslmode=require` 교체
-- [x] `phase4_crawler.py` DB_CONFIG도 Supabase 주소로 교체
+- [x] Supabase 프로젝트 생성 및 psql로 복원 (2026-02-28)
+- [x] `app.py` DB_URL → `st.secrets["DB_URL"]`로 교체
+- [x] `phase4_crawler.py` DB_CONFIG Supabase 주소로 교체
+- [x] Streamlit Community Cloud 배포 완료
 
 ---
 
@@ -492,10 +495,11 @@ DB_URL = "postgresql+psycopg2://postgres:[비밀번호]@[프로젝트].supabase.
 - [x] 전 시도 시/군 단위 세분화 (경기수원·경북포항·경남창원 등, 사이드바·구인건수·급여 추이·병원팝업 모두 적용)
 - [x] `phase4_crawler.py` 수정 → 급여 통합 + `--info` / `--from` / `--to` 날짜 범위 옵션 추가
 - [x] **Tab 2 전국 지도 & 흐름 보기** — small multiples + bubble map 추가
+- [x] **엑셀 과거자료 DB 이관** — `machwi_excel_history` 테이블 생성 + 4,220건 import 완료
+- [x] **Supabase 이관** — 로컬 PostgreSQL → Supabase 완료 (2026-02-28)
+- [x] **Streamlit Community Cloud 배포** — `alclssna33/salary_map` (2026-02-28)
 - [ ] `app.py` — Streamlit `use_container_width` → `width` 파라미터 교체
 - [ ] 크롤러 정기 자동 실행 (Windows 작업 스케줄러)
 - [ ] 마감 임박 공고 필터 기능 추가
 - [ ] 지역별 히트맵 시각화 추가
 - [ ] 자체 홈페이지 API 연동 크롤러(`gaebigong_crawler.py`) 작성
-- [x] **엑셀 과거자료 DB 이관** — `machwi_excel_history` 테이블 생성 + 4,220건 import 완료 → `load_excel_machwi()` DB 쿼리 방식으로 교체 완료
-- [ ] **Supabase 이관 시** — `machwi_excel_history` 테이블도 함께 이관 (`pg_dump`에 자동 포함됨)
