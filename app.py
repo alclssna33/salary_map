@@ -917,7 +917,17 @@ def show_hospital_dialog(month: str, region: str, specialty: str,
         st.divider()
 
     # ── 병원 목록 표 ───────────────────────────────────────────────────────
-    st.caption(f"총 **{len(df_h)}개** 병원")
+    _sort_col, _caption_col = st.columns([2, 3])
+    with _sort_col:
+        _sort_order = st.radio(
+            "중복횟수 정렬", ["내림차순 ↓", "오름차순 ↑"],
+            horizontal=True, key="hosp_sort_order",
+        )
+    with _caption_col:
+        st.caption(f"총 **{len(df_h)}개** 병원")
+    df_h = df_h.sort_values(
+        "recruit_count", ascending=(_sort_order == "오름차순 ↑")
+    ).reset_index(drop=True)
     display = df_h.copy()
     display.insert(4, "Net월급(퇴직금포함)", display.apply(format_salary, axis=1))
     display.insert(6, "중복횟수", display["recruit_count"].apply(format_count))
