@@ -69,11 +69,12 @@ from salary_calculator import parse_salary
 # 설정
 # ============================================================
 DB_CONFIG = {
-    'host': 'localhost',
+    'host': 'aws-1-ap-northeast-1.pooler.supabase.com',
     'port': 5432,
-    'dbname': 'medigate',
-    'user': 'postgres',
-    'password': 'postgres',
+    'dbname': 'postgres',
+    'user': 'postgres.mmqfmdqhujuohypcjkne',
+    'password': 'KUHOHriqT3DdiS7w',
+    'sslmode': 'require',
 }
 
 LOGIN_TRIGGER_URL = "https://new.medigate.net/recruit/list"

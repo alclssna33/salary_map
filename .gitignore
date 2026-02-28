@@ -1,0 +1,26 @@
+# 가상환경
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Streamlit 로컬 시크릿 (절대 커밋하면 안 됨)
+.streamlit/secrets.toml
+
+# DB 덤프 (용량 큼)
+medigate_dump.sql
+
+# 크롤러 로그
+crawl_log.txt
+salary_backfill_log.txt
+
+# 엑셀 원본 (개인정보 포함 가능)
+*.xlsx
+
+# IDE
+.venv/
+.idea/
+.vscode/
+
+# Claude Code
+.claude/

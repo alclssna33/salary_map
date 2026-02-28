@@ -46,15 +46,17 @@
 
 ## 🔗 핵심 연결 정보
 
-### PostgreSQL (실제 데이터)
+### Supabase (실제 데이터) — 2026-02-28 이관 완료
 | 항목 | 값 |
 |------|----|
-| Host | `localhost` |
+| Host (Pooler) | `aws-1-ap-northeast-1.pooler.supabase.com` |
 | Port | `5432` |
-| DB명 | `medigate` |
-| User | `postgres` |
-| Password | `postgres` |
-| Connection URL | `postgresql+psycopg2://postgres:postgres@localhost:5432/medigate` |
+| DB명 | `postgres` |
+| User | `postgres.mmqfmdqhujuohypcjkne` |
+| Password | `KUHOHriqT3DdiS7w` |
+| Connection URL | `postgresql+psycopg2://postgres.mmqfmdqhujuohypcjkne:KUHOHriqT3DdiS7w@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres?sslmode=require` |
+
+> 로컬 백업: `medigate_dump.sql` (2026-02-28 덤프)
 
 ### 메디게이트 로그인 계정
 | 항목 | 값 |
@@ -472,10 +474,10 @@ DB_URL = "postgresql+psycopg2://postgres:[비밀번호]@[프로젝트].supabase.
 
 ### 이관 체크리스트
 
-- [ ] `pg_dump`로 기존 DB 백업 (`machwi_excel_history` 자동 포함)
-- [ ] Supabase 프로젝트 생성 및 복원
-- [ ] `app.py` DB_URL + `?sslmode=require` 교체
-- [ ] `phase4_crawler.py` DB_CONFIG도 Supabase 주소로 교체
+- [x] `pg_dump`로 기존 DB 백업 (`machwi_excel_history` 자동 포함) → `medigate_dump.sql`
+- [x] Supabase 프로젝트 생성 및 복원 (2026-02-28)
+- [x] `app.py` DB_URL + `?sslmode=require` 교체
+- [x] `phase4_crawler.py` DB_CONFIG도 Supabase 주소로 교체
 
 ---
 

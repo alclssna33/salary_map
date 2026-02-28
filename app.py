@@ -28,7 +28,7 @@ st.set_page_config(
     layout="wide",
 )
 
-DB_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/medigate"
+DB_URL = st.secrets["DB_URL"]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
