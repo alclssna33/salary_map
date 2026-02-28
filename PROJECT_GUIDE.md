@@ -429,6 +429,14 @@ pip install matplotlib
 | | — Tab1 막대 클릭 + Tab2 지도 클릭이 동시에 살아있을 때 `@st.dialog` 충돌 발생 |
 | | — `_dialog_opened` 세션 플래그로 rerun당 하나의 다이얼로그만 열리도록 처리 |
 | | — 크롤러 신규 수집: 379건 추가 (2026-02-24 ~ 2026-02-28) |
+| 2026-02-28 (4) | **버그수정** — 월별 구인건수 카운팅 기준 통일 |
+| | — 상단 `load_aggregated()`: `COUNT(DISTINCT id)` → `COUNT(DISTINCT hospital_name)` |
+| | — 하단 마취 장기트렌드 `load_machwi_combined()`: DB 쿼리에 `employment_type='봉직의'` 필터 추가 |
+| | — 지역=전체 시 UNION ALL 이중 카운팅 제거: 시도 단위 행(2글자)만 사용하도록 필터 추가 |
+| | — 결과: 2월(DB only 월)부터 상단·하단 건수 일치 / 1월은 하단에 엑셀 합산으로 의도적 차이 유지 |
+| | **버그수정** — Tab2 시도별/시군구별 급여 Y축 최솟값 1,300만원 고정 |
+| | — `range=[1300, None]` 방식이 Plotly에서 미동작 → `range=[1300, data_max×1.1]` 명시적 계산으로 변경 |
+| | — 시도별 small multiples · 시군구별 small multiples 모두 적용 |
 
 ---
 
