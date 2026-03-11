@@ -603,6 +603,23 @@ def main():
         LOG_FILE.close()
         return
 
+    # --from 미지정 시 DB 최신 날짜를 자동으로 시작일로 사용 (1일 중복)
+    if date_from is None:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT MAX(register_date) FROM recruit_posts
+                WHERE source = 'medigate'
+                  AND register_date IS NOT NULL AND register_date <> ''
+            """)
+            row = cur.fetchone()
+            cur.close()
+            if row and row[0]:
+                date_from = row[0]
+                log(f"  [자동] --from 미지정 → DB 최신 날짜 {date_from} 부터 수집 (1일 중복)")
+        except Exception as e:
+            log(f"  [경고] 자동 시작일 조회 실패: {e}")
+
     # 수집 날짜 범위 출력
     log("  수집 날짜 범위:")
     log(f"    시작일 : {date_from if date_from else '제한 없음 (전체)'}")
