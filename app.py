@@ -28,6 +28,51 @@ st.set_page_config(
     layout="wide",
 )
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 비밀번호 게이트 (secrets.toml에서 PASSWORD_GATE = false 로 끄기 가능)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _password_gate():
+    if not st.secrets.get("PASSWORD_GATE", False):
+        return  # 기능 꺼짐 → 바로 통과
+
+    if st.session_state.get("authenticated"):
+        return  # 이미 인증됨
+
+    st.markdown(
+        """
+        <style>
+        .gate-box {
+            max-width: 360px;
+            margin: 15vh auto 0;
+            padding: 2rem 2.5rem;
+            border: 1px solid #e0e0e0;
+            border-radius: 12px;
+            background: #fafafa;
+            text-align: center;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.container():
+        st.markdown('<div class="gate-box">', unsafe_allow_html=True)
+        st.markdown("### 🔒 개원비밀공간 구인 트렌드")
+        st.markdown("접속하려면 비밀번호를 입력하세요.")
+        pw = st.text_input("비밀번호", type="password", key="_gate_pw", label_visibility="collapsed", placeholder="비밀번호 입력")
+        if st.button("입력", use_container_width=True):
+            if pw == st.secrets.get("APP_PASSWORD", ""):
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("비밀번호가 틀렸습니다.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.stop()  # 인증 전까지 이하 코드 실행 차단
+
+
+_password_gate()
+
 DB_URL = st.secrets["DB_URL"]
 
 
