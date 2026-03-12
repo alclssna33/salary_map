@@ -432,9 +432,12 @@ def get_total_pages(soup):
 
 
 # ============================================================
-# 상세 페이지 급여 추출
+# 상세 페이지 급여 + 초빙과목 추출
 # ============================================================
-def extract_salary_text(driver, url: str):
+def extract_detail_info(driver, url: str):
+    """상세 페이지에서 급여 텍스트 + 초빙과목 리스트를 동시에 추출.
+    반환: {'salary': str|None, 'specialties': list}
+    """
     for attempt in range(DETAIL_RETRY + 1):
         try:
             driver.get(url)
@@ -444,22 +447,42 @@ def extract_salary_text(driver, url: str):
             time.sleep(1.2)
 
             soup = BeautifulSoup(driver.page_source, 'html.parser')
+            salary_text       = None
+            detail_specialties = []
+
             for row in soup.find_all('div', class_='my-qjvukt'):
                 label = row.find('span', class_='my-1daa3uy')
-                if label and label.get_text(strip=True) == '급여':
-                    val_div = row.find(
-                        'div',
-                        class_=lambda c: c and 'flex-[1_0_0]' in c
-                    )
-                    if val_div:
-                        return val_div.get_text(separator=' ', strip=True)
-            return None
+                if not label:
+                    continue
+                label_text = label.get_text(strip=True)
+                val_div = row.find(
+                    'div',
+                    class_=lambda c: c and 'flex-[1_0_0]' in c
+                )
+                if not val_div:
+                    continue
+
+                if label_text == '급여':
+                    salary_text = val_div.get_text(separator=' ', strip=True)
+                elif label_text == '초빙과목':
+                    raw = val_div.get_text(strip=True)
+                    detail_specialties = [
+                        s.strip() for s in raw.split(',')
+                        if s.strip() and len(s.strip()) >= 2
+                    ]
+
+            return {'salary': salary_text, 'specialties': detail_specialties}
 
         except Exception as e:
             if attempt < DETAIL_RETRY:
                 time.sleep(3)
             else:
                 raise
+
+
+# 하위 호환용 래퍼 (기존 코드와의 호환성 유지)
+def extract_salary_text(driver, url: str):
+    return extract_detail_info(driver, url).get('salary')
 
 
 # ============================================================
@@ -534,6 +557,25 @@ def save_to_db(conn, post, existing_keys):
         conn.rollback()
         log(f"    ⚠ DB 저장 오류: {e}")
         return None
+    finally:
+        cur.close()
+
+
+def update_specialties(conn, db_id: int, specialties: list):
+    """상세 페이지 초빙과목으로 specialty 교체 (기존 삭제 후 재삽입)."""
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM recruit_post_specialties WHERE post_id = %s", (db_id,))
+        for sp in specialties:
+            if sp and len(sp) >= 2:
+                cur.execute(
+                    "INSERT INTO recruit_post_specialties (post_id, specialty) VALUES (%s,%s)",
+                    (db_id, sp)
+                )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        log(f"    ⚠ specialty 업데이트 오류 (id={db_id}): {e}")
     finally:
         cur.close()
 
@@ -733,18 +775,23 @@ def main():
             if new_id is None:
                 total_skipped += 1
             else:
-                # 신규 — 상세 페이지 방문하여 급여 수집
+                # 신규 — 상세 페이지 방문하여 급여 + 초빙과목 수집
                 total_saved += 1
-                raw_text = None
-                parsed   = {}
+                raw_text          = None
+                parsed            = {}
+                detail_specialties = []
                 try:
-                    raw_text = extract_salary_text(driver, post['url'])
-                    parsed   = parse_salary(raw_text) if raw_text else {}
+                    detail             = extract_detail_info(driver, post['url'])
+                    raw_text           = detail.get('salary')
+                    parsed             = parse_salary(raw_text) if raw_text else {}
+                    detail_specialties = detail.get('specialties', [])
                 except Exception as e:
-                    log(f"    ⚠ 급여 수집 오류 (id={new_id}): {e}")
+                    log(f"    ⚠ 상세 수집 오류 (id={new_id}): {e}")
                     cnt_sal_err += 1
 
                 save_salary(conn, new_id, raw_text, parsed)
+                if detail_specialties:
+                    update_specialties(conn, new_id, detail_specialties)
 
                 if parsed.get('salary_net_min') is not None:
                     cnt_salary += 1
